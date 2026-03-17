@@ -1,6 +1,9 @@
 package consensus
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"math/big"
 	"testing"
 
@@ -42,5 +45,30 @@ func TestPriorityRegistryApplySuffixRule(t *testing.T) {
 	}
 	if adjustment.NetMinerReward.String() != "436" {
 		t.Fatalf("NetMinerReward = %s, want 436", adjustment.NetMinerReward.String())
+	}
+}
+
+func TestBuildProofHashMatchesCanonicalPayload(t *testing.T) {
+	t.Parallel()
+
+	payload, err := json.Marshal(struct {
+		TaskID      string `json:"taskId"`
+		URL         string `json:"url"`
+		ContentHash string `json:"contentHash"`
+		SimHash     uint64 `json:"simHash"`
+	}{
+		TaskID:      "task-1",
+		URL:         "https://example.com",
+		ContentHash: "content-hash",
+		SimHash:     42,
+	})
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	sum := sha256.Sum256(payload)
+	want := hex.EncodeToString(sum[:])
+
+	if got := buildProofHash("task-1", "https://example.com", "content-hash", 42); got != want {
+		t.Fatalf("buildProofHash = %s, want %s", got, want)
 	}
 }

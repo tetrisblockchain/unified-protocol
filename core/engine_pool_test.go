@@ -1,8 +1,16 @@
 package core
 
 import (
+	"crypto/ed25519"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"math/big"
+	"path/filepath"
 	"testing"
+
+	"unified/core/consensus"
+	"unified/core/types"
 )
 
 func TestTxPoolReplacementRequiresPriceBump(t *testing.T) {
@@ -61,5 +69,70 @@ func TestTaskPoolEnforcesSenderAndGlobalLimits(t *testing.T) {
 	secondSender := SearchTaskEnvelope{Transaction: Transaction{Hash: "task-3", From: "UFI_B", Value: "100", Nonce: 0}}
 	if err := globallyLimited.Add(secondSender); !errors.Is(err, ErrPoolFull) {
 		t.Fatalf("Add globally-limited second task error = %v, want ErrPoolFull", err)
+	}
+}
+
+func TestEngineSubmitSearchTaskAllowsQueuedSequentialNonces(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey returned error: %v", err)
+	}
+	sender, err := types.NewAddressFromPubKey(publicKey)
+	if err != nil {
+		t.Fatalf("NewAddressFromPubKey returned error: %v", err)
+	}
+
+	chain := openTestChain(t, filepath.Join(t.TempDir(), "chain"), map[string]*big.Int{
+		sender.String(): big.NewInt(1_000_000),
+	})
+	defer chain.Close()
+
+	engine := NewEngine(chain, consensus.Miner{PriorityRegistry: consensus.NewPriorityRegistry()}, "UFI_TEST_MINER", nil)
+	baseBounty := big.NewInt(100)
+	totalValue, err := consensus.QuoteBounty(baseBounty, 1, 10)
+	if err != nil {
+		t.Fatalf("QuoteBounty returned error: %v", err)
+	}
+
+	for nonce := uint64(0); nonce < 2; nonce++ {
+		request := SearchTaskRequest{
+			Query:           "initial web seed",
+			URL:             fmt.Sprintf("https://example.com/%d", nonce),
+			BaseBounty:      baseBounty.String(),
+			Difficulty:      1,
+			DataVolumeBytes: 10,
+		}
+		payload, err := json.Marshal(request)
+		if err != nil {
+			t.Fatalf("Marshal returned error: %v", err)
+		}
+
+		tx := Transaction{
+			Type:  TxTypeSearchTask,
+			From:  sender.String(),
+			Value: totalValue.String(),
+			Nonce: nonce,
+			Data:  payload,
+		}
+		if err := tx.Sign(privateKey); err != nil {
+			t.Fatalf("Sign returned error: %v", err)
+		}
+
+		if _, err := engine.SubmitSearchTask(tx, request); err != nil {
+			t.Fatalf("SubmitSearchTask nonce %d returned error: %v", nonce, err)
+		}
+	}
+
+	pendingNonce, err := engine.PendingNonce(sender.String())
+	if err != nil {
+		t.Fatalf("PendingNonce returned error: %v", err)
+	}
+	if pendingNonce != 2 {
+		t.Fatalf("PendingNonce = %d, want 2", pendingNonce)
+	}
+	if latest := chain.PendingNonce(sender.String()); latest != 0 {
+		t.Fatalf("chain PendingNonce = %d, want 0 before mining", latest)
 	}
 }

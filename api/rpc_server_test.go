@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"unified/core"
+	"unified/core/consensus"
+	"unified/core/types"
 )
 
 func TestRPCServerRejectsOversizedBody(t *testing.T) {
@@ -166,5 +169,83 @@ func TestRPCServerCallRejectsNonZeroValue(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "does not accept value") {
 		t.Fatalf("ufi_call body = %s, want non-payable error", response.Body.String())
+	}
+}
+
+func TestRPCServerGetTransactionCountReportsLatestAndPending(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey returned error: %v", err)
+	}
+	sender, err := types.NewAddressFromPubKey(publicKey)
+	if err != nil {
+		t.Fatalf("NewAddressFromPubKey returned error: %v", err)
+	}
+
+	chain, err := core.OpenBlockchain(core.BlockchainConfig{
+		DataDir: filepath.Join(t.TempDir(), "chain"),
+		GenesisBalances: map[string]*big.Int{
+			sender.String(): big.NewInt(1_000_000),
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenBlockchain returned error: %v", err)
+	}
+	defer chain.Close()
+
+	engine := core.NewEngine(chain, consensus.Miner{PriorityRegistry: consensus.NewPriorityRegistry()}, "UFI_TEST_MINER", nil)
+	request := core.SearchTaskRequest{
+		Query:           "initial web seed",
+		URL:             "https://example.com",
+		BaseBounty:      "100",
+		Difficulty:      1,
+		DataVolumeBytes: 10,
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	totalValue, err := consensus.QuoteBounty(big.NewInt(100), 1, 10)
+	if err != nil {
+		t.Fatalf("QuoteBounty returned error: %v", err)
+	}
+	tx := core.Transaction{
+		Type:  core.TxTypeSearchTask,
+		From:  sender.String(),
+		Value: totalValue.String(),
+		Nonce: 0,
+		Data:  payload,
+	}
+	if err := tx.Sign(privateKey); err != nil {
+		t.Fatalf("Sign returned error: %v", err)
+	}
+	if _, err := engine.SubmitSearchTask(tx, request); err != nil {
+		t.Fatalf("SubmitSearchTask returned error: %v", err)
+	}
+
+	server := NewRPCServer(chain, engine, nil)
+
+	latestPayload := `{"jsonrpc":"2.0","id":5,"method":"ufi_getTransactionCount","params":{"address":"` + sender.String() + `","block":"latest"}}`
+	latestRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(latestPayload))
+	latestResponse := httptest.NewRecorder()
+	server.ServeHTTP(latestResponse, latestRequest)
+	if latestResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_getTransactionCount status = %d, want %d", latestResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(latestResponse.Body.String(), `"nonce":"0"`) {
+		t.Fatalf("ufi_getTransactionCount body = %s, want latest nonce 0", latestResponse.Body.String())
+	}
+
+	pendingPayload := `{"jsonrpc":"2.0","id":6,"method":"eth_getTransactionCount","params":["` + sender.String() + `","pending"]}`
+	pendingRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(pendingPayload))
+	pendingResponse := httptest.NewRecorder()
+	server.ServeHTTP(pendingResponse, pendingRequest)
+	if pendingResponse.Code != http.StatusOK {
+		t.Fatalf("eth_getTransactionCount status = %d, want %d", pendingResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(pendingResponse.Body.String(), `"result":"0x1"`) {
+		t.Fatalf("eth_getTransactionCount body = %s, want pending nonce 0x1", pendingResponse.Body.String())
 	}
 }

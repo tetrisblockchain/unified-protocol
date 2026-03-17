@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"math/big"
 	"math/bits"
@@ -45,21 +46,21 @@ var (
 
 // CrawlTask packages a user query into work that miners can execute against seed URLs.
 type CrawlTask struct {
-	ID                     string
-	Query                  string
-	SeedURLs               []string
-	BaseDifficulty         uint64
-	Difficulty             uint64
-	AdjustedDifficulty     uint64
-	DataVolumeBytes        uint64
-	BaseBounty             *big.Int
-	TotalBounty            *big.Int
-	ArchitectFee           *big.Int
-	MinerReward            *big.Int
+	ID                      string
+	Query                   string
+	SeedURLs                []string
+	BaseDifficulty          uint64
+	Difficulty              uint64
+	AdjustedDifficulty      uint64
+	DataVolumeBytes         uint64
+	BaseBounty              *big.Int
+	TotalBounty             *big.Int
+	ArchitectFee            *big.Int
+	MinerReward             *big.Int
 	GovernanceMultiplierBPS uint64
-	PrioritySectors        []string
-	CreatedAt              time.Time
-	ExpiresAt              time.Time
+	PrioritySectors         []string
+	CreatedAt               time.Time
+	ExpiresAt               time.Time
 }
 
 // IndexedPage is the crawl ledger payload produced by a successful PoUW run.
@@ -117,18 +118,18 @@ type Miner struct {
 }
 
 type MiningResult struct {
-	TaskID                string
-	MinerID               string
-	URL                   string
-	Page                  IndexedPage
-	ProofHash             string
-	AppliedMultiplierBPS  uint64
+	TaskID                 string
+	MinerID                string
+	URL                    string
+	Page                   IndexedPage
+	ProofHash              string
+	AppliedMultiplierBPS   uint64
 	AppliedPrioritySectors []string
-	AdjustedDifficulty    uint64
-	AdjustedBounty        *big.Int
-	ArchitectFee          *big.Int
-	MinerReward           *big.Int
-	CompletedAt           time.Time
+	AdjustedDifficulty     uint64
+	AdjustedBounty         *big.Int
+	ArchitectFee           *big.Int
+	MinerReward            *big.Int
+	CompletedAt            time.Time
 }
 
 type ValidatorNode interface {
@@ -144,18 +145,18 @@ type Validator struct {
 }
 
 type ValidatorObservation struct {
-	ValidatorID          string
-	Similarity           float64
-	Matched              bool
-	GovernanceMatched    bool
+	ValidatorID           string
+	Similarity            float64
+	Matched               bool
+	GovernanceMatched     bool
 	ExpectedMultiplierBPS uint64
-	ExpectedDifficulty   uint64
-	ExpectedBounty       string
-	ExpectedArchitectFee string
-	ExpectedMinerReward  string
-	PageHash             string
-	SimHash              uint64
-	Error                string
+	ExpectedDifficulty    uint64
+	ExpectedBounty        string
+	ExpectedArchitectFee  string
+	ExpectedMinerReward   string
+	PageHash              string
+	SimHash               uint64
+	Error                 string
 }
 
 type ValidationResult struct {
@@ -192,18 +193,18 @@ func NewCrawlTask(query string, seedURLs []string, baseBounty *big.Int, difficul
 
 	createdAt := time.Now().UTC()
 	task := CrawlTask{
-		Query:                  normalizedQuery,
-		SeedURLs:               normalizedURLs,
-		BaseDifficulty:         difficulty,
-		Difficulty:             difficulty,
-		AdjustedDifficulty:     difficulty,
-		DataVolumeBytes:        dataVolume,
-		BaseBounty:             cloneBigInt(baseBounty),
-		TotalBounty:            quotedBounty,
-		ArchitectFee:           constants.ArchitectFee(quotedBounty),
-		MinerReward:            new(big.Int).Sub(cloneBigInt(quotedBounty), constants.ArchitectFee(quotedBounty)),
+		Query:                   normalizedQuery,
+		SeedURLs:                normalizedURLs,
+		BaseDifficulty:          difficulty,
+		Difficulty:              difficulty,
+		AdjustedDifficulty:      difficulty,
+		DataVolumeBytes:         dataVolume,
+		BaseBounty:              cloneBigInt(baseBounty),
+		TotalBounty:             quotedBounty,
+		ArchitectFee:            constants.ArchitectFee(quotedBounty),
+		MinerReward:             new(big.Int).Sub(cloneBigInt(quotedBounty), constants.ArchitectFee(quotedBounty)),
 		GovernanceMultiplierBPS: constants.DefaultMultiplierBPS,
-		CreatedAt:              createdAt,
+		CreatedAt:               createdAt,
 	}
 
 	if ttl > 0 {
@@ -727,14 +728,19 @@ func SimHash(text string) uint64 {
 }
 
 func buildProofHash(taskID, targetURL, contentHash string, simHash uint64) string {
-	payload := strings.Join([]string{
-		taskID,
-		targetURL,
-		contentHash,
-		strconv.FormatUint(simHash, 10),
-	}, "|")
+	payload, _ := json.Marshal(struct {
+		TaskID      string `json:"taskId"`
+		URL         string `json:"url"`
+		ContentHash string `json:"contentHash"`
+		SimHash     uint64 `json:"simHash"`
+	}{
+		TaskID:      taskID,
+		URL:         targetURL,
+		ContentHash: contentHash,
+		SimHash:     simHash,
+	})
 
-	sum := sha256.Sum256([]byte(payload))
+	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
 }
 

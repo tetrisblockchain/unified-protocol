@@ -362,6 +362,14 @@ func (bc *Blockchain) PendingNonce(address string) uint64 {
 	return bc.state.Nonces[address]
 }
 
+func (bc *Blockchain) NonceAt(address, blockRef string) (uint64, error) {
+	state, err := bc.stateForBlockRef(blockRef)
+	if err != nil {
+		return 0, err
+	}
+	return state.Nonces[strings.TrimSpace(address)], nil
+}
+
 func (bc *Blockchain) GetBalance(address string) *big.Int {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()

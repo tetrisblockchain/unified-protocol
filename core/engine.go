@@ -28,6 +28,7 @@ var (
 	ErrPoolFull               = errors.New("core: mempool is full")
 	ErrSenderQueueFull        = errors.New("core: sender pending limit reached")
 	ErrReplacementUnderpriced = errors.New("core: replacement transaction underpriced")
+	ErrPendingNonceConflict   = errors.New("core: pending nonce conflict")
 )
 
 type TxPool struct {
@@ -60,6 +61,7 @@ type Engine struct {
 	MiningInterval time.Duration
 	PublishBlock   func(context.Context, Block) error
 
+	submitMu sync.Mutex
 	mu       sync.Mutex
 	inFlight bool
 }
@@ -146,6 +148,19 @@ func (p *TxPool) Drain(limit int) []Transaction {
 	p.pending = append([]Transaction(nil), p.pending[limit:]...)
 	p.rebuildIndicesLocked()
 	return out
+}
+
+func (p *TxPool) PendingForSender(sender string) []Transaction {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	pending := make([]Transaction, 0, p.senderCounts[sender])
+	for _, tx := range p.pending {
+		if tx.From == sender {
+			pending = append(pending, tx)
+		}
+	}
+	return pending
 }
 
 func (p *TaskPool) Add(task SearchTaskEnvelope) error {
@@ -237,6 +252,19 @@ func (p *TaskPool) Requeue(tasks []SearchTaskEnvelope) {
 	}
 }
 
+func (p *TaskPool) PendingForSender(sender string) []SearchTaskEnvelope {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	pending := make([]SearchTaskEnvelope, 0, p.senderCounts[sender])
+	for _, task := range p.pending {
+		if task.Transaction.From == sender {
+			pending = append(pending, task)
+		}
+	}
+	return pending
+}
+
 func (e *Engine) SubmitTransaction(tx Transaction) (string, error) {
 	if e.Blockchain == nil {
 		return "", ErrInvalidBlock
@@ -245,7 +273,9 @@ func (e *Engine) SubmitTransaction(tx Transaction) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := e.Blockchain.ValidateTransaction(normalized); err != nil {
+	e.submitMu.Lock()
+	defer e.submitMu.Unlock()
+	if err := e.validatePendingTransaction(normalized); err != nil {
 		return "", err
 	}
 	if err := e.TxPool.Add(normalized); err != nil {
@@ -262,13 +292,27 @@ func (e *Engine) SubmitSearchTask(tx Transaction, request SearchTaskRequest) (Se
 	if err != nil {
 		return SearchTaskEnvelope{}, err
 	}
-	if err := e.Blockchain.ValidateTransaction(envelope.Transaction); err != nil {
+	e.submitMu.Lock()
+	defer e.submitMu.Unlock()
+	if err := e.validatePendingTransaction(envelope.Transaction); err != nil {
 		return SearchTaskEnvelope{}, err
 	}
 	if err := e.TaskPool.Add(envelope); err != nil {
 		return SearchTaskEnvelope{}, err
 	}
 	return envelope, nil
+}
+
+func (e *Engine) PendingNonce(address string) (uint64, error) {
+	if e.Blockchain == nil {
+		return 0, ErrInvalidBlock
+	}
+
+	snapshot, err := e.pendingStateForSender(address)
+	if err != nil {
+		return 0, err
+	}
+	return snapshot.Nonces[address], nil
 }
 
 func (e *Engine) StartMining(ctx context.Context) {
@@ -376,6 +420,60 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 	}
 
 	return e.Blockchain.MineBlock(e.MinerAddress, blockTransactions, crawlProofs)
+}
+
+func (e *Engine) validatePendingTransaction(tx Transaction) error {
+	snapshot, err := e.pendingStateForSender(tx.From)
+	if err != nil {
+		return err
+	}
+	_, err = ApplyTransaction(snapshot, tx)
+	return err
+}
+
+func (e *Engine) pendingStateForSender(sender string) (*StateSnapshot, error) {
+	if e.Blockchain == nil {
+		return nil, ErrInvalidBlock
+	}
+
+	snapshot, _ := e.Blockchain.Snapshot()
+	pending, err := mergeSenderPendingTransactions(e.TxPool.PendingForSender(sender), e.TaskPool.PendingForSender(sender))
+	if err != nil {
+		return nil, err
+	}
+	for _, tx := range pending {
+		if _, err := ApplyTransaction(snapshot, tx); err != nil {
+			return nil, err
+		}
+	}
+	return snapshot, nil
+}
+
+func mergeSenderPendingTransactions(transfers []Transaction, tasks []SearchTaskEnvelope) ([]Transaction, error) {
+	merged := make([]Transaction, 0, len(transfers)+len(tasks))
+	for _, tx := range transfers {
+		merged = append(merged, tx)
+	}
+	for _, task := range tasks {
+		merged = append(merged, task.Transaction)
+	}
+
+	sort.SliceStable(merged, func(i, j int) bool {
+		if merged[i].Nonce == merged[j].Nonce {
+			if merged[i].Timestamp.Equal(merged[j].Timestamp) {
+				return merged[i].Hash < merged[j].Hash
+			}
+			return merged[i].Timestamp.Before(merged[j].Timestamp)
+		}
+		return merged[i].Nonce < merged[j].Nonce
+	})
+
+	for index := 1; index < len(merged); index++ {
+		if merged[index-1].Nonce == merged[index].Nonce {
+			return nil, ErrPendingNonceConflict
+		}
+	}
+	return merged, nil
 }
 
 func (p *TxPool) indexOfHashLocked(hash string) int {

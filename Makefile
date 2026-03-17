@@ -19,8 +19,14 @@ CIRCULATING_SUPPLY ?= 1000000
 ARCHITECT_KEY ?=
 GENESIS_URL ?=
 GENESIS_QUERY ?=
+URLS_FILE ?=
+SEED_QUERY ?= initial web seed
+SEED_BASE_BOUNTY ?= 1.0
+SEED_DIFFICULTY ?= 8
+SEED_DATA_VOLUME_BYTES ?= 1024
+SEED_BATCH_SIZE ?= 32
 
-.PHONY: setup tidy fmt test build build-node build-cli run-node run-mine genesis bootstrap-architect solc-uns smoke-health smoke-rpc clean
+.PHONY: setup tidy fmt test build build-node build-cli run-node run-mine genesis bootstrap-architect seed-urls solc-uns smoke-health smoke-rpc clean
 
 setup:
 	./setup.sh
@@ -93,6 +99,19 @@ bootstrap-architect:
 	UFI_GENESIS_URL="$(GENESIS_URL)" \
 	UFI_GENESIS_QUERY="$(GENESIS_QUERY)" \
 	./scripts/bootstrap_architect.sh
+
+seed-urls:
+	test -n "$(ARCHITECT_KEY)" || (echo "ARCHITECT_KEY is required" && exit 1)
+	test -n "$(URLS_FILE)" || (echo "URLS_FILE is required" && exit 1)
+	UFI_ARCHITECT_KEY="$(ARCHITECT_KEY)" \
+	UFI_RPC_URL="http://$(RPCHOST):$(RPCPORT)" \
+	$(GO) run ./scripts/seed_urls \
+		--file "$(URLS_FILE)" \
+		--query "$(SEED_QUERY)" \
+		--base-bounty "$(SEED_BASE_BOUNTY)" \
+		--difficulty "$(SEED_DIFFICULTY)" \
+		--data-volume-bytes "$(SEED_DATA_VOLUME_BYTES)" \
+		--batch-size "$(SEED_BATCH_SIZE)"
 
 solc-uns:
 	mkdir -p $(BUILD_DIR)

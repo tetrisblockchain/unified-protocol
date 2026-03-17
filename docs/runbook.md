@@ -133,6 +133,36 @@ Compile the UNS Solidity artifact:
 make solc-uns
 ```
 
+## Bulk URL Seeding
+
+Prepare a file with one URL per line. Optional per-line query overrides are supported as `url,query`.
+
+Example:
+
+```text
+https://example.com
+https://openai.com,ai research
+https://mit.edu
+```
+
+Run the seeder against the local node:
+
+```bash
+ARCHITECT_KEY=<hex-or-base64-ed25519-key> \
+make seed-urls \
+  URLS_FILE=./urls.txt \
+  SEED_QUERY="initial web seed" \
+  SEED_BASE_BOUNTY=1.0 \
+  SEED_DIFFICULTY=8 \
+  SEED_DATA_VOLUME_BYTES=1024
+```
+
+Operational notes:
+
+- The sender account must have enough UFD for the full quoted bounty set.
+- The script refuses to start if the sender already has pending transactions.
+- One sender can keep at most `32` tasks in flight with the current node limits, so large seeds are submitted in waves while the miner drains the queue.
+
 ## Shutdown And Recovery
 
 - Stop the daemon with `Ctrl+C` or a `SIGTERM` to allow the HTTP server and BadgerDB to shut down cleanly.

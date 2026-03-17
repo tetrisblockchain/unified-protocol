@@ -63,6 +63,11 @@ type getBalanceParams struct {
 	Address string `json:"address"`
 }
 
+type getTransactionCountParams struct {
+	Address string `json:"address"`
+	Block   string `json:"block,omitempty"`
+}
+
 type getBlockParams struct {
 	Number string `json:"number"`
 }
@@ -155,6 +160,26 @@ func (s *RPCServer) handle(r rpcRequest) (any, *rpcError) {
 			return nil, invalidParams(err)
 		}
 		return map[string]string{"balance": s.Blockchain.GetBalance(params.Address).String()}, nil
+	case "ufi_getTransactionCount":
+		address, blockRef, err := decodeTransactionCountParams(r.Params)
+		if err != nil {
+			return nil, invalidParams(err)
+		}
+		nonce, err := s.resolveTransactionCount(address, blockRef)
+		if err != nil {
+			return nil, rpcFailure(err)
+		}
+		return map[string]string{"nonce": strconv.FormatUint(nonce, 10)}, nil
+	case "eth_getTransactionCount":
+		address, blockRef, err := decodeTransactionCountParams(r.Params)
+		if err != nil {
+			return nil, invalidParams(err)
+		}
+		nonce, err := s.resolveTransactionCount(address, blockRef)
+		if err != nil {
+			return nil, rpcFailure(err)
+		}
+		return fmt.Sprintf("0x%x", nonce), nil
 	case "ufi_sendTransaction":
 		var tx core.Transaction
 		if err := decodeParams(r.Params, &tx); err != nil {
@@ -448,6 +473,59 @@ func decodeCallParams(raw json.RawMessage) (core.CallMessage, string, error) {
 		Data:  input,
 		Value: value,
 	}, blockRef, nil
+}
+
+func decodeTransactionCountParams(raw json.RawMessage) (string, string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", "", fmt.Errorf("missing params")
+	}
+
+	params := getTransactionCountParams{Block: "latest"}
+	if raw[0] == '[' {
+		var values []json.RawMessage
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return "", "", err
+		}
+		if len(values) == 0 {
+			return "", "", fmt.Errorf("missing params")
+		}
+		if err := json.Unmarshal(values[0], &params.Address); err != nil {
+			return "", "", err
+		}
+		if len(values) > 1 && len(values[1]) > 0 && string(values[1]) != "null" {
+			if err := json.Unmarshal(values[1], &params.Block); err != nil {
+				return "", "", err
+			}
+		}
+	} else {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return "", "", err
+		}
+	}
+
+	address := strings.TrimSpace(params.Address)
+	if address == "" {
+		return "", "", fmt.Errorf("address is required")
+	}
+	blockRef := strings.TrimSpace(params.Block)
+	if blockRef == "" {
+		blockRef = "latest"
+	}
+	return address, blockRef, nil
+}
+
+func (s *RPCServer) resolveTransactionCount(address, blockRef string) (uint64, error) {
+	switch strings.ToLower(strings.TrimSpace(blockRef)) {
+	case "", "latest":
+		return s.Blockchain.NonceAt(address, "latest")
+	case "pending":
+		if s.Engine == nil {
+			return s.Blockchain.NonceAt(address, "latest")
+		}
+		return s.Engine.PendingNonce(address)
+	default:
+		return s.Blockchain.NonceAt(address, blockRef)
+	}
 }
 
 func parseCallValue(raw string) (*big.Int, error) {
