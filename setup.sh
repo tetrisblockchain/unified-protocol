@@ -73,6 +73,7 @@ Common commands:
   make build
   make run-node
   make run-mine
+  sudo make install-seed-node
 
 See docs/runbook.md for bootstrap, multi-node, backup, and shutdown guidance.
 EOF

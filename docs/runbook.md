@@ -70,6 +70,58 @@ make run-node \
   BOOTNODES=/ip4/127.0.0.1/tcp/4001/p2p/12D3KooW...
 ```
 
+## Seed Node Server Install
+
+For a persistent Linux server, install the node as a systemd service instead of running it in a shell.
+
+Dry-run the installer:
+
+```bash
+sudo UNIFIED_DRY_RUN=1 \
+  UNIFIED_GENESIS_ADDRESS=UFI_SHARED_MAINNET_GENESIS \
+  UNIFIED_OPERATOR_ADDRESS=UFI_MAINNET_SEED_OPERATOR \
+  UNIFIED_OPERATOR_ALIAS=mainnet-seed-1 \
+  UNIFIED_BOOTNODES=/ip4/203.0.113.10/tcp/4001/p2p/12D3KooW... \
+  make install-seed-node
+```
+
+Install and write the env file plus systemd unit:
+
+```bash
+sudo UNIFIED_GENESIS_ADDRESS=UFI_SHARED_MAINNET_GENESIS \
+  UNIFIED_OPERATOR_ADDRESS=UFI_MAINNET_SEED_OPERATOR \
+  UNIFIED_OPERATOR_ALIAS=mainnet-seed-1 \
+  UNIFIED_BOOTNODES=/ip4/203.0.113.10/tcp/4001/p2p/12D3KooW... \
+  UNIFIED_CIRCULATING_SUPPLY=1000000 \
+  make install-seed-node
+```
+
+Install and start immediately:
+
+```bash
+sudo UNIFIED_GENESIS_ADDRESS=UFI_SHARED_MAINNET_GENESIS \
+  UNIFIED_OPERATOR_ADDRESS=UFI_MAINNET_SEED_OPERATOR \
+  UNIFIED_OPERATOR_ALIAS=mainnet-seed-1 \
+  UNIFIED_BOOTNODES=/ip4/203.0.113.10/tcp/4001/p2p/12D3KooW... \
+  UNIFIED_CIRCULATING_SUPPLY=1000000 \
+  ./scripts/ops/install_seed_node.sh --start --overwrite-env
+```
+
+Installed paths by default:
+
+- Binary: `/usr/local/bin/unified-node`
+- Env file: `/etc/unified/unified-seed-node.env`
+- Systemd unit: `/etc/systemd/system/unified-seed-node.service`
+- Datadir: `/var/lib/unified`
+- Logs: `journalctl -u unified-seed-node`
+
+Operational notes:
+
+- Keep `UNIFIED_RPC_HOST=127.0.0.1` unless you intentionally expose RPC behind access controls.
+- Replace placeholder `REPLACE_ME` values before starting.
+- All shared-network nodes still need the exact same genesis address and circulating supply.
+- If you need different paths or service names, override the documented `UNIFIED_*` installer variables.
+
 ## Genesis Bootstrap
 
 Fastest path:
