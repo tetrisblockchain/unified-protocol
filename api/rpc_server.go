@@ -99,6 +99,14 @@ type getNamePriceParams struct {
 	Name string `json:"name"`
 }
 
+type resolveNameParams struct {
+	Name string `json:"name"`
+}
+
+type reverseResolveParams struct {
+	Address string `json:"address"`
+}
+
 type callParams struct {
 	To    string `json:"to"`
 	From  string `json:"from,omitempty"`
@@ -208,6 +216,38 @@ func (s *RPCServer) handle(r rpcRequest) (any, *rpcError) {
 		}
 		_ = blockRef
 		return s.Blockchain.ContractCodeAt(address), nil
+	case "ufi_resolveName":
+		var params resolveNameParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		record, ok := s.Blockchain.ResolveName(params.Name)
+		if !ok {
+			return map[string]any{"found": false}, nil
+		}
+		return map[string]any{
+			"found":   true,
+			"name":    record.Name,
+			"owner":   record.Owner,
+			"txHash":  record.TxHash,
+			"created": record.RegisteredAt,
+		}, nil
+	case "ufi_reverseResolve":
+		var params reverseResolveParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		record, ok := s.Blockchain.ReverseResolve(params.Address)
+		if !ok {
+			return map[string]any{"found": false}, nil
+		}
+		return map[string]any{
+			"found":   true,
+			"name":    record.Name,
+			"owner":   record.Owner,
+			"txHash":  record.TxHash,
+			"created": record.RegisteredAt,
+		}, nil
 	case "ufi_sendTransaction":
 		var tx core.Transaction
 		if err := decodeParams(r.Params, &tx); err != nil {

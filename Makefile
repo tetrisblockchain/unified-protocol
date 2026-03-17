@@ -1,9 +1,11 @@
 GO ?= go
+NPM ?= npm
 SOLC ?= npx --yes solc@0.8.24
 
 BUILD_DIR ?= build
 NODE_BIN := $(BUILD_DIR)/unified-node
 CLI_BIN := $(BUILD_DIR)/unified-cli
+DESKTOP_DIR := web3/desktop
 
 DATADIR ?= ./data/local
 RPCHOST ?= 127.0.0.1
@@ -31,7 +33,7 @@ RESTORE_TARGET ?=
 PID_FILE ?=
 ROLL_LOG ?= ./logs/unified-node-rollout.log
 
-.PHONY: setup tidy fmt test build build-node build-cli run-node run-mine genesis bootstrap-architect seed-urls check-node backup-datadir restore-datadir rollout-node solc-uns smoke-health smoke-rpc clean
+.PHONY: setup tidy fmt test build build-node build-cli desktop-install desktop-dev desktop-build desktop-start run-node run-mine genesis bootstrap-architect seed-urls check-node backup-datadir restore-datadir rollout-node solc-uns smoke-health smoke-rpc clean
 
 setup:
 	./setup.sh
@@ -54,6 +56,18 @@ build-node:
 build-cli:
 	mkdir -p $(BUILD_DIR)
 	$(GO) build -o $(CLI_BIN) ./cmd/unified-cli
+
+desktop-install:
+	cd $(DESKTOP_DIR) && $(NPM) install
+
+desktop-dev:
+	cd $(DESKTOP_DIR) && $(NPM) run dev
+
+desktop-build:
+	cd $(DESKTOP_DIR) && $(NPM) run build
+
+desktop-start: desktop-build
+	cd $(DESKTOP_DIR) && $(NPM) run start
 
 run-node:
 	$(GO) run ./cmd/unified-node \
@@ -161,3 +175,4 @@ smoke-rpc:
 
 clean:
 	rm -rf $(BUILD_DIR)
+	rm -rf $(DESKTOP_DIR)/dist

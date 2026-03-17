@@ -15,6 +15,7 @@ import (
 
 	"unified/core"
 	"unified/core/consensus"
+	coreconstants "unified/core/constants"
 	"unified/core/types"
 )
 
@@ -295,5 +296,72 @@ func TestRPCServerGetCodeAndContracts(t *testing.T) {
 	}
 	if !strings.Contains(listContractsResponse.Body.String(), `"address":"0x101"`) || !strings.Contains(listContractsResponse.Body.String(), `"address":"0x102"`) {
 		t.Fatalf("ufi_listContracts body = %s, want both system contracts", listContractsResponse.Body.String())
+	}
+}
+
+func TestRPCServerResolveAndReverseResolve(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey returned error: %v", err)
+	}
+	sender, err := types.NewAddressFromPubKey(publicKey)
+	if err != nil {
+		t.Fatalf("NewAddressFromPubKey returned error: %v", err)
+	}
+	callData, err := core.EncodeRegisterNameCall("Architect")
+	if err != nil {
+		t.Fatalf("EncodeRegisterNameCall returned error: %v", err)
+	}
+
+	chain, err := core.OpenBlockchain(core.BlockchainConfig{
+		DataDir: filepath.Join(t.TempDir(), "chain"),
+		GenesisBalances: map[string]*big.Int{
+			sender.String(): big.NewInt(200_000),
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenBlockchain returned error: %v", err)
+	}
+	defer chain.Close()
+
+	tx := core.Transaction{
+		Type:  core.TxTypeTransfer,
+		From:  sender.String(),
+		To:    coreconstants.UNSRegistryAddress,
+		Value: "100000",
+		Nonce: 0,
+		Data:  callData,
+	}
+	if err := tx.Sign(privateKey); err != nil {
+		t.Fatalf("Sign returned error: %v", err)
+	}
+	if _, err := chain.MineBlock("UFI_TEST_MINER", []core.Transaction{tx}, nil); err != nil {
+		t.Fatalf("MineBlock returned error: %v", err)
+	}
+
+	server := NewRPCServer(chain, nil, nil)
+
+	resolvePayload := `{"jsonrpc":"2.0","id":10,"method":"ufi_resolveName","params":{"name":"Architect"}}`
+	resolveRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(resolvePayload))
+	resolveResponse := httptest.NewRecorder()
+	server.ServeHTTP(resolveResponse, resolveRequest)
+	if resolveResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_resolveName status = %d, want %d", resolveResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(resolveResponse.Body.String(), `"found":true`) || !strings.Contains(resolveResponse.Body.String(), sender.String()) {
+		t.Fatalf("ufi_resolveName body = %s, want owner match", resolveResponse.Body.String())
+	}
+
+	reversePayload := `{"jsonrpc":"2.0","id":11,"method":"ufi_reverseResolve","params":{"address":"` + sender.String() + `"}}`
+	reverseRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(reversePayload))
+	reverseResponse := httptest.NewRecorder()
+	server.ServeHTTP(reverseResponse, reverseRequest)
+	if reverseResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_reverseResolve status = %d, want %d", reverseResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(reverseResponse.Body.String(), `"name":"Architect"`) {
+		t.Fatalf("ufi_reverseResolve body = %s, want Architect", reverseResponse.Body.String())
 	}
 }

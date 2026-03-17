@@ -127,11 +127,48 @@ Build the CLI and node binaries:
 make build
 ```
 
+Install the desktop wallet/explorer dependencies:
+
+```bash
+make desktop-install
+```
+
+Build the desktop renderer bundle:
+
+```bash
+make desktop-build
+```
+
 Compile the UNS Solidity artifact:
 
 ```bash
 make solc-uns
 ```
+
+## Desktop Wallet / Explorer
+
+The Electron wallet/explorer lives under `web3/desktop` and expects a running UniFied node on `http://127.0.0.1:8545` unless you override the RPC URL in the app.
+
+Start the desktop app in development mode:
+
+```bash
+make desktop-dev
+```
+
+Start Electron against the built bundle:
+
+```bash
+make desktop-start
+```
+
+Current desktop capabilities:
+
+- Import or generate a local Ed25519 session key.
+- Derive the UFI address locally and inspect balance plus latest/pending nonce.
+- Resolve and reverse-resolve UNS names.
+- Sign and broadcast standard transfers.
+- Quote and sign UNS registrations.
+- Inspect blocks, search indexed pages, view system contracts, and watch governance rules/proposals.
 
 ## Contract Introspection
 
