@@ -1,0 +1,28 @@
+# --- UniFied Protocol GitIgnore ---
+
+# Binaries and executables
+build/
+bin/
+unified-node
+unified-cli
+
+# Go specific
+go.sum
+vendor/
+*.out
+*.test
+
+# Local Node Data (Crucial: Never upload your local ledger)
+testnet/
+data/
+*.db
+keystore/
+
+# OS/IDE specific
+.DS_Store
+.vscode/
+.idea/
+
+# Environment/Secrets
+.env
+UFI_ARCHITECT_KEY
