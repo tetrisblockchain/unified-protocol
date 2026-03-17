@@ -68,6 +68,15 @@ type getTransactionCountParams struct {
 	Block   string `json:"block,omitempty"`
 }
 
+type getCodeParams struct {
+	Address string `json:"address"`
+	Block   string `json:"block,omitempty"`
+}
+
+type getContractParams struct {
+	Address string `json:"address"`
+}
+
 type getBlockParams struct {
 	Number string `json:"number"`
 }
@@ -180,6 +189,25 @@ func (s *RPCServer) handle(r rpcRequest) (any, *rpcError) {
 			return nil, rpcFailure(err)
 		}
 		return fmt.Sprintf("0x%x", nonce), nil
+	case "ufi_getContract":
+		var params getContractParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		record, ok := s.Blockchain.ContractAt(params.Address)
+		if !ok {
+			return nil, rpcFailure(core.ErrUnsupportedNativeContract)
+		}
+		return record, nil
+	case "ufi_listContracts":
+		return s.Blockchain.ListContracts(), nil
+	case "eth_getCode":
+		address, blockRef, err := decodeCodeParams(r.Params)
+		if err != nil {
+			return nil, invalidParams(err)
+		}
+		_ = blockRef
+		return s.Blockchain.ContractCodeAt(address), nil
 	case "ufi_sendTransaction":
 		var tx core.Transaction
 		if err := decodeParams(r.Params, &tx); err != nil {
@@ -481,6 +509,45 @@ func decodeTransactionCountParams(raw json.RawMessage) (string, string, error) {
 	}
 
 	params := getTransactionCountParams{Block: "latest"}
+	if raw[0] == '[' {
+		var values []json.RawMessage
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return "", "", err
+		}
+		if len(values) == 0 {
+			return "", "", fmt.Errorf("missing params")
+		}
+		if err := json.Unmarshal(values[0], &params.Address); err != nil {
+			return "", "", err
+		}
+		if len(values) > 1 && len(values[1]) > 0 && string(values[1]) != "null" {
+			if err := json.Unmarshal(values[1], &params.Block); err != nil {
+				return "", "", err
+			}
+		}
+	} else {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return "", "", err
+		}
+	}
+
+	address := strings.TrimSpace(params.Address)
+	if address == "" {
+		return "", "", fmt.Errorf("address is required")
+	}
+	blockRef := strings.TrimSpace(params.Block)
+	if blockRef == "" {
+		blockRef = "latest"
+	}
+	return address, blockRef, nil
+}
+
+func decodeCodeParams(raw json.RawMessage) (string, string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", "", fmt.Errorf("missing params")
+	}
+
+	params := getCodeParams{Block: "latest"}
 	if raw[0] == '[' {
 		var values []json.RawMessage
 		if err := json.Unmarshal(raw, &values); err != nil {

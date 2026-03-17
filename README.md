@@ -11,10 +11,11 @@ The current workspace includes a persistent blockchain state engine, a 15-second
 
 - **`cmd/unified-node`**: Persistent node daemon with BadgerDB-backed chain state, JSON-RPC, governance endpoints, and libp2p networking.
 - **`cmd/unified-cli`**: Governance CLI for listing proposals and casting votes.
-- **`core/blockchain.go`**: Ledger persistence, transaction/state transitions, search index storage, native `0x101`/`0x102` contract routing, and **3.33% Architect Fee** enforcement.
-- **`core/engine.go`**: Multi-threaded mempools plus the PoUW mining loop.
-- **`api/rpc_server.go`**: JSON-RPC methods for balances, transfers, blocks, search task submission, local search-index reads, and native contract calls.
-- **`contracts/UNS.sol`**: UniFied Name Service registry contract that prices names based on `0x101` search precompile mention frequency.
+- **`core/blockchain.go`**: Ledger persistence, transaction/state transitions, search index storage, system-contract accessors, and **3.33% Architect Fee** enforcement.
+- **`core/engine.go`**: Mempools plus the PoUW mining loop.
+- **`core/system_contracts.go`**: Explicit system-contract registry for `0x101` and `0x102`, including ABI metadata and descriptor bytecode.
+- **`api/rpc_server.go`**: JSON-RPC methods for balances, search task submission, contract introspection, and native contract reads.
+- **`contracts/UNS.sol`**: UNS registry contract that prices names based on `0x101` search precompile mention frequency.
 
 ---
 
@@ -23,7 +24,7 @@ The current workspace includes a persistent blockchain state engine, a 15-second
 To ensure long-term sustainability and continuous innovation, UniFied implements a hard-coded **3.33% Architect Fee** at the consensus level.
 
 * **Sustainability:** 3.33% of every block reward, search bounty, and UNS registration is automatically routed to the **Genesis Architect Address**.
-* **Immutability:** This fee is a core state transition rule in `core/blockchain.go`. Any block failing to distribute this share is considered invalid by the network.
+* **Immutability:** This fee is a core state transition rule. Any block failing to distribute this share is rejected by the network.
 
 ---
 
@@ -42,13 +43,12 @@ make test        # Run PoUW and state logic tests
 make build       # Compile unified-node and unified-cli
 make run-node    # Launch the daemon
 make run-mine    # Launch daemon with mining enabled
+make check-node  # Verify health of a running node
 ```
 
 ---
 
 ## 🏗️ Genesis Bootstrap
-
-The genesis script handles UNS registration, broadcasts the Architect identity, and submits the first crawl seed tasks.
 
 **Single-command bootstrap:**
 ```bash
@@ -61,33 +61,45 @@ make bootstrap-architect \
 
 ## 🔍 Bulk URL Seeding
 
-Seed the node with live governance-aware bounty quotes using a `urls.txt` file (one URL per line).
-
+Seed the node with live governance-aware bounty quotes:
 ```bash
 ARCHITECT_KEY=<hex-or-base64-ed25519-key> \
 make seed-urls \
   URLS_FILE=./urls.txt \
   SEED_QUERY="initial web seed" \
-  SEED_BASE_BOUNTY=1.0 \
-  SEED_DIFFICULTY=8
+  SEED_BASE_BOUNTY=1.0
 ```
 
 ---
 
 ## 📡 JSON-RPC API Examples
 
-**Get a Balance:**
+**List Deployed System Contracts:**
 ```bash
 curl -s -X POST [http://127.0.0.1:8545/rpc](http://127.0.0.1:8545/rpc) \
   -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"ufi_getBalance","params":{"address":"UFI_LOCAL_OPERATOR"}}'
+  -d '{"jsonrpc":"2.0","id":8,"method":"ufi_listContracts","params":{}}'
 ```
 
-**Read Indexed Crawl Data:**
+**Inspect Descriptor Bytecode:**
 ```bash
 curl -s -X POST [http://127.0.0.1:8545/rpc](http://127.0.0.1:8545/rpc) \
   -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":3,"method":"ufi_getSearchData","params":{"url":"[https://example.edu](https://example.edu)","term":"search"}}'
+  -d '{"jsonrpc":"2.0","id":10,"method":"eth_getCode","params":["0x102","latest"]}'
+```
+
+---
+
+## ⚙️ Operations
+
+**Backup a Data Directory:**
+```bash
+make backup-datadir DATADIR=./data/local
+```
+
+**Run a Build-plus-Backup Rollout:**
+```bash
+make rollout-node DATADIR=./data/local
 ```
 
 ---
@@ -108,18 +120,20 @@ curl -X POST [http://127.0.0.1:8545/governance/proposals](http://127.0.0.1:8545/
   }'
 ```
 
-**Vote via CLI:**
+**Advance Local Governance Height:**
 ```bash
-go run ./cmd/unified-cli vote --proposal 1 --choice Yes
+curl -X POST [http://127.0.0.1:8545/chain/advance](http://127.0.0.1:8545/chain/advance) \
+  -H 'Content-Type: application/json' \
+  -d '{"blocks":40321}'
 ```
 
 ---
 
 ## 🛡️ Launch Readiness & Safety
 
-* **Syncing:** Peers sync missing blocks over libp2p. Remote blocks pass PoUW validator-quorum checks before import.
-* **Persistence:** Governance state and side-branches survive node restarts; reorgs favor the heavier canonical chain.
-* **Security:** Ingress paths enforce bounded mempools and RPC/P2P rate limits.
+* **Improved:** System contracts `0x101`/`0x102` now support explicit introspection via `eth_getCode` and `ufi_listContracts`.
+* **Improved:** Remote blocks pass validator-quorum checks; nodes persist side branches and handle reorgs via cumulative PoUW work.
+* **Still Missing:** Advanced peer reputation and adaptive abuse controls.
 
 ---
 

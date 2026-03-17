@@ -249,3 +249,51 @@ func TestRPCServerGetTransactionCountReportsLatestAndPending(t *testing.T) {
 		t.Fatalf("eth_getTransactionCount body = %s, want pending nonce 0x1", pendingResponse.Body.String())
 	}
 }
+
+func TestRPCServerGetCodeAndContracts(t *testing.T) {
+	t.Parallel()
+
+	chain, err := core.OpenBlockchain(core.BlockchainConfig{
+		DataDir:         filepath.Join(t.TempDir(), "chain"),
+		GenesisBalances: map[string]*big.Int{},
+	})
+	if err != nil {
+		t.Fatalf("OpenBlockchain returned error: %v", err)
+	}
+	defer chain.Close()
+
+	server := NewRPCServer(chain, nil, nil)
+
+	getCodePayload := `{"jsonrpc":"2.0","id":7,"method":"eth_getCode","params":["0x102","latest"]}`
+	getCodeRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(getCodePayload))
+	getCodeResponse := httptest.NewRecorder()
+	server.ServeHTTP(getCodeResponse, getCodeRequest)
+	if getCodeResponse.Code != http.StatusOK {
+		t.Fatalf("eth_getCode status = %d, want %d", getCodeResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(getCodeResponse.Body.String(), `"result":"0xfe`) {
+		t.Fatalf("eth_getCode body = %s, want descriptor bytecode", getCodeResponse.Body.String())
+	}
+
+	getContractPayload := `{"jsonrpc":"2.0","id":8,"method":"ufi_getContract","params":{"address":"0x101"}}`
+	getContractRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(getContractPayload))
+	getContractResponse := httptest.NewRecorder()
+	server.ServeHTTP(getContractResponse, getContractRequest)
+	if getContractResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_getContract status = %d, want %d", getContractResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(getContractResponse.Body.String(), `"address":"0x101"`) || !strings.Contains(getContractResponse.Body.String(), `"name":"SearchPrecompile"`) {
+		t.Fatalf("ufi_getContract body = %s, want search precompile record", getContractResponse.Body.String())
+	}
+
+	listContractsPayload := `{"jsonrpc":"2.0","id":9,"method":"ufi_listContracts","params":{}}`
+	listContractsRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(listContractsPayload))
+	listContractsResponse := httptest.NewRecorder()
+	server.ServeHTTP(listContractsResponse, listContractsRequest)
+	if listContractsResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_listContracts status = %d, want %d", listContractsResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(listContractsResponse.Body.String(), `"address":"0x101"`) || !strings.Contains(listContractsResponse.Body.String(), `"address":"0x102"`) {
+		t.Fatalf("ufi_listContracts body = %s, want both system contracts", listContractsResponse.Body.String())
+	}
+}

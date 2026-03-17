@@ -432,6 +432,22 @@ func (bc *Blockchain) CallContract(call CallMessage, blockRef string) ([]byte, e
 	return ExecuteReadOnlyCall(state, call)
 }
 
+func (bc *Blockchain) ContractAt(address string) (ContractRecord, bool) {
+	return SystemContractAt(address)
+}
+
+func (bc *Blockchain) ContractCodeAt(address string) string {
+	record, ok := bc.ContractAt(address)
+	if !ok {
+		return "0x"
+	}
+	return record.Code
+}
+
+func (bc *Blockchain) ListContracts() []ContractRecord {
+	return ListSystemContracts()
+}
+
 func (bc *Blockchain) UNSRegistrationPrice(name string) (*big.Int, error) {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
@@ -466,6 +482,22 @@ func (bc *Blockchain) ResolveName(name string) (NameRecord, bool) {
 
 	record, ok := bc.state.Names[normalizeUNSName(name)]
 	return record, ok
+}
+
+func (bc *Blockchain) ReverseResolve(address string) (NameRecord, bool) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	target := strings.TrimSpace(address)
+	if target == "" {
+		return NameRecord{}, false
+	}
+	for _, record := range bc.state.Names {
+		if record.Owner == target {
+			return record, true
+		}
+	}
+	return NameRecord{}, false
 }
 
 func (bc *Blockchain) SeedBalance(address string, amount *big.Int) error {

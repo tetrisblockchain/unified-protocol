@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"unified/core/consensus"
@@ -213,6 +214,29 @@ func TestBlockchainCallContractUsesBlockReference(t *testing.T) {
 	}
 	if got := new(big.Int).SetBytes(output).String(); got != "100000" {
 		t.Fatalf("CallContract output = %s, want 100000", got)
+	}
+}
+
+func TestSystemContractsExposeDescriptorMetadata(t *testing.T) {
+	t.Parallel()
+
+	search, ok := SystemContractAt(constants.SearchPrecompileAddress)
+	if !ok {
+		t.Fatalf("SystemContractAt(%s) not found", constants.SearchPrecompileAddress)
+	}
+	if !strings.HasPrefix(search.Code, "0xfe") {
+		t.Fatalf("search contract code = %s, want descriptor prefix", search.Code)
+	}
+
+	uns, ok := SystemContractAt(constants.UNSRegistryAddress)
+	if !ok {
+		t.Fatalf("SystemContractAt(%s) not found", constants.UNSRegistryAddress)
+	}
+	if uns.Name != "UNSRegistry" {
+		t.Fatalf("uns contract name = %s, want UNSRegistry", uns.Name)
+	}
+	if len(uns.Functions) < 3 {
+		t.Fatalf("uns contract functions len = %d, want at least 3", len(uns.Functions))
 	}
 }
 

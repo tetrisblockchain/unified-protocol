@@ -20,42 +20,16 @@ type CallMessage struct {
 	Value *big.Int
 }
 
-func IsNativeContractAddress(address string) bool {
-	switch strings.TrimSpace(address) {
-	case constants.SearchPrecompileAddress, constants.UNSRegistryAddress:
-		return true
-	default:
-		return false
-	}
-}
-
 func CallNativeContract(state *StateSnapshot, to string, data []byte) ([]byte, error) {
 	if state == nil {
 		return nil, ErrInvalidTransaction
 	}
 
-	switch strings.TrimSpace(to) {
-	case constants.SearchPrecompileAddress:
-		term, err := DecodeMentionFrequencyCall(data)
-		if err != nil {
-			return nil, err
-		}
-		return padUint256(new(big.Int).SetUint64(mentionFrequencyFromState(state, term))), nil
-	case constants.UNSRegistryAddress:
-		if term, err := DecodeRegistrationPriceCall(data); err == nil {
-			price, priceErr := UNSRegistrationPriceFromState(state, term)
-			if priceErr != nil {
-				return nil, priceErr
-			}
-			return padUint256(price), nil
-		}
-		if term, err := DecodeMentionFrequencyCall(data); err == nil {
-			return padUint256(new(big.Int).SetUint64(mentionFrequencyFromState(state, term))), nil
-		}
-		return nil, ErrInvalidUNSCall
-	default:
+	contract, ok := systemContractByAddress(to)
+	if !ok {
 		return nil, ErrUnsupportedNativeContract
 	}
+	return contract.call(state, CallMessage{To: strings.TrimSpace(to), Data: data})
 }
 
 func ExecuteNativeTransfer(state *StateSnapshot, tx Transaction, totalValue, netValue *big.Int) error {
@@ -63,14 +37,14 @@ func ExecuteNativeTransfer(state *StateSnapshot, tx Transaction, totalValue, net
 		return ErrInvalidTransaction
 	}
 
-	switch strings.TrimSpace(tx.To) {
-	case constants.UNSRegistryAddress:
-		return executeUNSRegistration(state, tx, totalValue, netValue)
-	case constants.SearchPrecompileAddress:
-		return ErrNativeCallNotPayable
-	default:
+	contract, ok := systemContractByAddress(tx.To)
+	if !ok {
 		return ErrUnsupportedNativeContract
 	}
+	if contract.execute == nil {
+		return ErrNativeCallNotPayable
+	}
+	return contract.execute(state, tx, totalValue, netValue)
 }
 
 func ExecuteReadOnlyCall(state *StateSnapshot, call CallMessage) ([]byte, error) {

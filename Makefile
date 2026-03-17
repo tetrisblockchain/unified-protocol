@@ -25,8 +25,13 @@ SEED_BASE_BOUNTY ?= 1.0
 SEED_DIFFICULTY ?= 8
 SEED_DATA_VOLUME_BYTES ?= 1024
 SEED_BATCH_SIZE ?= 32
+BACKUP_OUTPUT ?=
+BACKUP_ARCHIVE ?=
+RESTORE_TARGET ?=
+PID_FILE ?=
+ROLL_LOG ?= ./logs/unified-node-rollout.log
 
-.PHONY: setup tidy fmt test build build-node build-cli run-node run-mine genesis bootstrap-architect seed-urls solc-uns smoke-health smoke-rpc clean
+.PHONY: setup tidy fmt test build build-node build-cli run-node run-mine genesis bootstrap-architect seed-urls check-node backup-datadir restore-datadir rollout-node solc-uns smoke-health smoke-rpc clean
 
 setup:
 	./setup.sh
@@ -112,6 +117,35 @@ seed-urls:
 		--difficulty "$(SEED_DIFFICULTY)" \
 		--data-volume-bytes "$(SEED_DATA_VOLUME_BYTES)" \
 		--batch-size "$(SEED_BATCH_SIZE)"
+
+check-node:
+	UFI_RPC_URL="http://$(RPCHOST):$(RPCPORT)" \
+	./scripts/ops/check_node.sh
+
+backup-datadir:
+	test -n "$(DATADIR)" || (echo "DATADIR is required" && exit 1)
+	./scripts/ops/backup_datadir.sh "$(DATADIR)" "$(BACKUP_OUTPUT)"
+
+restore-datadir:
+	test -n "$(BACKUP_ARCHIVE)" || (echo "BACKUP_ARCHIVE is required" && exit 1)
+	test -n "$(RESTORE_TARGET)" || (echo "RESTORE_TARGET is required" && exit 1)
+	./scripts/ops/restore_datadir.sh "$(BACKUP_ARCHIVE)" "$(RESTORE_TARGET)"
+
+rollout-node:
+	UFI_DATADIR="$(DATADIR)" \
+	UFI_PID_FILE="$(PID_FILE)" \
+	UFI_LOG_FILE="$(ROLL_LOG)" \
+	./scripts/ops/rollout_node.sh \
+		--datadir "$(DATADIR)" \
+		--rpchost "$(RPCHOST)" \
+		--rpcport "$(RPCPORT)" \
+		--p2p-listen "$(P2P_LISTEN)" \
+		--bootnodes "$(BOOTNODES)" \
+		--genesis-address "$(GENESIS_ADDRESS)" \
+		--operator "$(OPERATOR)" \
+		--operator-alias "$(OPERATOR_ALIAS)" \
+		--operator-voting-power "$(OPERATOR_VOTING_POWER)" \
+		--circulating-supply "$(CIRCULATING_SUPPLY)"
 
 solc-uns:
 	mkdir -p $(BUILD_DIR)

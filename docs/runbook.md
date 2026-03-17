@@ -133,6 +133,36 @@ Compile the UNS Solidity artifact:
 make solc-uns
 ```
 
+## Contract Introspection
+
+The node exposes the protocol system contracts as first-class introspection targets.
+
+List them:
+
+```bash
+curl -s -X POST http://127.0.0.1:8545/rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"ufi_listContracts","params":{}}'
+```
+
+Fetch one contract record:
+
+```bash
+curl -s -X POST http://127.0.0.1:8545/rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"ufi_getContract","params":{"address":"0x102"}}'
+```
+
+Inspect descriptor bytecode:
+
+```bash
+curl -s -X POST http://127.0.0.1:8545/rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"eth_getCode","params":["0x102","latest"]}'
+```
+
+These system contracts are protocol-owned descriptors backed by native handlers, not a full general-purpose EVM deployment pipeline.
+
 ## Bulk URL Seeding
 
 Prepare a file with one URL per line. Optional per-line query overrides are supported as `url,query`.
@@ -162,6 +192,38 @@ Operational notes:
 - The sender account must have enough UFD for the full quoted bounty set.
 - The script refuses to start if the sender already has pending transactions.
 - One sender can keep at most `32` tasks in flight with the current node limits, so large seeds are submitted in waves while the miner drains the queue.
+
+## Operations Toolkit
+
+Health and surface check:
+
+```bash
+make check-node
+```
+
+Datadir backup:
+
+```bash
+make backup-datadir DATADIR=./data/local
+```
+
+Datadir restore:
+
+```bash
+make restore-datadir BACKUP_ARCHIVE=./data-local-20260317-120000.tar.gz RESTORE_TARGET=./data/restored
+```
+
+Build/test/backup rollout:
+
+```bash
+make rollout-node DATADIR=./data/local
+```
+
+For an automatic restart after build and backup:
+
+```bash
+UFI_RESTART=1 make rollout-node DATADIR=./data/local PID_FILE=./run/unified-node.pid
+```
 
 ## Shutdown And Recovery
 
