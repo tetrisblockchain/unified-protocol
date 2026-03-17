@@ -20,7 +20,7 @@ ARCHITECT_KEY ?=
 GENESIS_URL ?=
 GENESIS_QUERY ?=
 
-.PHONY: setup tidy fmt test build build-node build-cli run-node run-mine genesis solc-uns smoke-health smoke-rpc clean
+.PHONY: setup tidy fmt test build build-node build-cli run-node run-mine genesis bootstrap-architect solc-uns smoke-health smoke-rpc clean
 
 setup:
 	./setup.sh
@@ -78,6 +78,21 @@ genesis:
 	UFI_GENESIS_URL="$(GENESIS_URL)" \
 	UFI_GENESIS_QUERY="$(GENESIS_QUERY)" \
 	$(GO) run ./scripts/genesis_tx.go
+
+bootstrap-architect:
+	test -n "$(ARCHITECT_KEY)" || (echo "ARCHITECT_KEY is required" && exit 1)
+	UFI_ARCHITECT_KEY="$(ARCHITECT_KEY)" \
+	UFI_RPC_HOST="$(RPCHOST)" \
+	UFI_RPC_PORT="$(RPCPORT)" \
+	UFI_DATADIR="$(DATADIR)" \
+	UFI_P2P_LISTEN="$(P2P_LISTEN)" \
+	UFI_BOOTNODES="$(BOOTNODES)" \
+	UFI_OPERATOR_ALIAS="$(OPERATOR_ALIAS)" \
+	UFI_OPERATOR_VOTING_POWER="$(OPERATOR_VOTING_POWER)" \
+	UFI_CIRCULATING_SUPPLY="$(CIRCULATING_SUPPLY)" \
+	UFI_GENESIS_URL="$(GENESIS_URL)" \
+	UFI_GENESIS_QUERY="$(GENESIS_QUERY)" \
+	./scripts/bootstrap_architect.sh
 
 solc-uns:
 	mkdir -p $(BUILD_DIR)

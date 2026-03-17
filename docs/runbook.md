@@ -72,6 +72,18 @@ make run-node \
 
 ## Genesis Bootstrap
 
+Fastest path:
+
+```bash
+ARCHITECT_KEY=<hex-or-base64-ed25519-key> \
+make bootstrap-architect \
+  DATADIR=./data/genesis-architect
+```
+
+That script derives the Architect address from the supplied key, starts the node in the background with mining enabled, waits for the local health check, runs the genesis registration and seed task, and leaves the node running. Node logs are written to `./logs/architect-bootstrap-*.log`.
+
+Manual path:
+
 1. Start the node with mining enabled and the architect address as both `OPERATOR` and `GENESIS_ADDRESS`.
 2. Export the architect private key.
 3. Run the genesis script to register the `Architect` UNS name and submit the seed crawl task.
