@@ -74,6 +74,12 @@ make run-node \
 
 For a persistent Linux server, install the node as a systemd service instead of running it in a shell.
 
+If `go` is missing on the host, install it first:
+
+```bash
+sudo make install-go-linux
+```
+
 Dry-run the installer:
 
 ```bash

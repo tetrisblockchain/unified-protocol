@@ -1,0 +1,27 @@
+[Unit]
+Description=UniFied Seed Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{SYSTEM_USER}}
+Group={{SYSTEM_GROUP}}
+WorkingDirectory={{WORK_DIR}}
+EnvironmentFile={{ENV_FILE}}
+ExecStart={{BINARY_PATH}}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths={{DATA_DIR}} {{WORK_DIR}} {{LOG_DIR}}
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

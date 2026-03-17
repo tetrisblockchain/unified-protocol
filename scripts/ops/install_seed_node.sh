@@ -86,6 +86,12 @@ run_cmd() {
 
 require_command() {
 	command -v "$1" >/dev/null 2>&1 || {
+		if [[ "$1" == "go" ]]; then
+			echo "Missing required dependency: go" >&2
+			echo "Install Go 1.25+ first. On Linux you can use:" >&2
+			echo "  sudo ./scripts/ops/install_go_linux.sh" >&2
+			exit 1
+		fi
 		echo "Missing required dependency: $1" >&2
 		exit 1
 	}

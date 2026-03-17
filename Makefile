@@ -33,7 +33,7 @@ RESTORE_TARGET ?=
 PID_FILE ?=
 ROLL_LOG ?= ./logs/unified-node-rollout.log
 
-.PHONY: setup tidy fmt test build build-node build-cli desktop-install desktop-dev desktop-build desktop-start install-seed-node run-node run-mine genesis bootstrap-architect seed-urls check-node backup-datadir restore-datadir rollout-node solc-uns smoke-health smoke-rpc clean
+.PHONY: setup tidy fmt test build build-node build-cli desktop-install desktop-dev desktop-build desktop-start install-go-linux install-seed-node run-node run-mine genesis bootstrap-architect seed-urls check-node backup-datadir restore-datadir rollout-node solc-uns smoke-health smoke-rpc clean
 
 setup:
 	./setup.sh
@@ -68,6 +68,9 @@ desktop-build:
 
 desktop-start: desktop-build
 	cd $(DESKTOP_DIR) && $(NPM) run start
+
+install-go-linux:
+	./scripts/ops/install_go_linux.sh
 
 install-seed-node:
 	./scripts/ops/install_seed_node.sh
