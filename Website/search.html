@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UniFied Search | The Ledger of the Web</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .search-glow:focus {
+            box-shadow: 0 0 15px rgba(59, 130, 246, 0.5);
+            border-color: #3b82f6;
+        }
+        .result-card:hover {
+            background-color: #1a202c;
+        }
+    </style>
+</head>
+<body class="bg-[#0b0e14] text-gray-200 font-sans min-h-screen">
+
+    <nav class="p-4 border-b border-gray-800 flex justify-between items-center">
+        <div class="flex items-center space-x-4">
+            <span class="font-bold text-xl tracking-tighter">UFI<span class="text-blue-500">NI</span>FIED</span>
+            <div class="hidden md:flex bg-gray-900 rounded-full px-3 py-1 text-xs border border-gray-700 text-gray-400">
+                Network: Mainnet-333
+            </div>
+        </div>
+        <div class="flex items-center space-x-6 text-sm">
+            <a href="index.html" class="hover:text-blue-400">Home</a>
+            <a href="#" class="hover:text-blue-400">Explorer</a>
+            <div class="flex items-center space-x-2 bg-blue-900/30 text-blue-400 px-3 py-1 rounded-full border border-blue-800">
+                <i class="fa-solid fa-wallet"></i>
+                <span class="font-mono">UFI_User:Architect</span>
+            </div>
+        </div>
+    </nav>
+
+    <div class="max-w-4xl mx-auto pt-16 px-6">
+        <div class="flex flex-col items-center mb-12">
+            <h1 class="text-4xl font-bold mb-8">Search the <span class="text-blue-500">Ledger</span></h1>
+            
+            <div class="relative w-full">
+                <input type="text" id="searchInput" 
+                    placeholder="Enter keywords or UFI address..." 
+                    class="w-full bg-gray-900 border border-gray-700 rounded-2xl py-4 px-6 text-lg focus:outline-none search-glow transition-all">
+                <button onclick="performSearch()" class="absolute right-3 top-2.5 bg-blue-600 hover:bg-blue-700 p-2.5 rounded-xl transition">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                </button>
+            </div>
+            
+            <div class="mt-4 flex space-x-4 text-xs text-gray-500">
+                <span>Trending: <a href="#" class="text-blue-400">#CryptoPolitics</a></span>
+                <span><a href="#" class="text-blue-400">#AIIndex</a></span>
+                <span><a href="#" class="text-blue-400">#GenesisBlock</a></span>
+            </div>
+        </div>
+
+        <div id="resultsArea" class="space-y-6 pb-20">
+            <div class="result-card p-6 border border-gray-800 rounded-2xl transition">
+                <div class="flex justify-between items-start mb-2">
+                    <a href="https://example.com" class="text-blue-400 text-xl font-medium hover:underline">UniFied Protocol Documentation - The New Internet</a>
+                    <span class="text-[10px] bg-green-900/20 text-green-400 px-2 py-0.5 rounded border border-green-800">Verified Crawl</span>
+                </div>
+                <p class="text-gray-400 text-sm mb-4 leading-relaxed">
+                    Learn how the PoUW consensus mechanism secures the web index. This block was verified by 12 nodes across 4 continents.
+                </p>
+                <div class="flex items-center space-x-4 text-[11px] font-mono text-gray-500">
+                    <span>Block: #104,221</span>
+                    <span>Miner: UFI8kL2m...vLmN</span>
+                    <span class="flex items-center"><i class="fa-solid fa-clock mr-1"></i> 2m ago</span>
+                </div>
+            </div>
+
+            <div class="result-card p-6 border border-gray-800 rounded-2xl transition">
+                <div class="flex justify-between items-start mb-2">
+                    <a href="#" class="text-blue-400 text-xl font-medium hover:underline">UFI_User: JohnDoe (Identity Profile)</a>
+                    <span class="text-[10px] bg-blue-900/20 text-blue-400 px-2 py-0.5 rounded border border-blue-800">UNS Registry</span>
+                </div>
+                <p class="text-gray-400 text-sm mb-4 leading-relaxed">
+                    Verified profile for JohnDoe. Popularity Score: 88/100. This identity was minted during the Genesis land rush.
+                </p>
+                <div class="flex items-center space-x-4 text-[11px] font-mono text-gray-500">
+                    <span>Registry: 0x102</span>
+                    <span>Owner: UFI17k9w...4rQz</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function performSearch() {
+            const query = document.getElementById('searchInput').value;
+            console.log("Querying UniFied RPC for:", query);
+            // This is where you'd connect to your node's API
+            // fetch('http://localhost:8545', { method: 'POST', ... })
+        }
+    </script>
+</body>
+</html>
