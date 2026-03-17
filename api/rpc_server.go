@@ -3,19 +3,32 @@ package api
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"unified/core"
+)
+
+const (
+	MaxRPCBodyBytes       = 1 << 20
+	DefaultRPCWriteLimit  = 60
+	DefaultRPCWriteWindow = time.Minute
 )
 
 type RPCServer struct {
 	Blockchain *core.Blockchain
 	Engine     *core.Engine
 	Logger     *log.Logger
+	limiter    *clientWindowLimiter
 }
 
 type rpcRequest struct {
@@ -63,6 +76,23 @@ type precompileParams struct {
 	Term string `json:"term"`
 }
 
+type callNativeParams struct {
+	To   string `json:"to"`
+	Data string `json:"data"`
+}
+
+type getNamePriceParams struct {
+	Name string `json:"name"`
+}
+
+type callParams struct {
+	To    string `json:"to"`
+	From  string `json:"from,omitempty"`
+	Data  string `json:"data"`
+	Value string `json:"value,omitempty"`
+	Block string `json:"block,omitempty"`
+}
+
 func NewRPCServer(blockchain *core.Blockchain, engine *core.Engine, logger *log.Logger) *RPCServer {
 	if logger == nil {
 		logger = log.Default()
@@ -71,6 +101,7 @@ func NewRPCServer(blockchain *core.Blockchain, engine *core.Engine, logger *log.
 		Blockchain: blockchain,
 		Engine:     engine,
 		Logger:     logger,
+		limiter:    newClientWindowLimiter(DefaultRPCWriteLimit, DefaultRPCWriteWindow),
 	}
 }
 
@@ -80,9 +111,26 @@ func (s *RPCServer) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 
+	request.Body = http.MaxBytesReader(writer, request.Body, MaxRPCBodyBytes)
 	var rpcPayload rpcRequest
-	if err := json.NewDecoder(request.Body).Decode(&rpcPayload); err != nil {
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&rpcPayload); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			s.writeError(writer, nil, http.StatusRequestEntityTooLarge, -32001, "request body too large")
+			return
+		}
 		s.writeError(writer, nil, http.StatusBadRequest, -32700, "invalid JSON-RPC payload")
+		return
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != io.EOF {
+		s.writeError(writer, nil, http.StatusBadRequest, -32700, "invalid JSON-RPC payload")
+		return
+	}
+	if s.isMutatingMethod(rpcPayload.Method) && s.limiter != nil && !s.limiter.Allow(clientAddress(request), time.Now()) {
+		s.writeError(writer, rpcPayload.ID, http.StatusTooManyRequests, -32005, "rate limit exceeded")
 		return
 	}
 
@@ -183,6 +231,43 @@ func (s *RPCServer) handle(r rpcRequest) (any, *rpcError) {
 			return nil, invalidParams(err)
 		}
 		return s.Blockchain.GetSearchData(params.URL, params.Term), nil
+	case "ufi_getNamePrice":
+		var params getNamePriceParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		price, err := s.Blockchain.UNSRegistrationPrice(params.Name)
+		if err != nil {
+			return nil, rpcFailure(err)
+		}
+		return map[string]string{"price": price.String()}, nil
+	case "ufi_call", "eth_call":
+		call, blockRef, err := decodeCallParams(r.Params)
+		if err != nil {
+			return nil, invalidParams(err)
+		}
+		output, err := s.Blockchain.CallContract(call, blockRef)
+		if err != nil {
+			return nil, rpcFailure(err)
+		}
+		return fmt.Sprintf("0x%x", output), nil
+	case "ufi_callNative":
+		var params callNativeParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		input, err := decodeHexPayload(params.Data)
+		if err != nil {
+			return nil, invalidParams(err)
+		}
+		output, err := s.Blockchain.CallContract(core.CallMessage{
+			To:   params.To,
+			Data: input,
+		}, "latest")
+		if err != nil {
+			return nil, rpcFailure(err)
+		}
+		return map[string]string{"output": fmt.Sprintf("0x%x", output)}, nil
 	case "ufi_callPrecompile0101":
 		var params precompileParams
 		if err := decodeParams(r.Params, &params); err != nil {
@@ -196,6 +281,88 @@ func (s *RPCServer) handle(r rpcRequest) (any, *rpcError) {
 	default:
 		return nil, &rpcError{Code: -32601, Message: "method not found"}
 	}
+}
+
+func (s *RPCServer) isMutatingMethod(method string) bool {
+	switch strings.TrimSpace(method) {
+	case "ufi_sendTransaction", "ufi_sendRawTransaction", "ufi_submitSearchTask":
+		return true
+	default:
+		return false
+	}
+}
+
+type clientWindowLimiter struct {
+	mu      sync.Mutex
+	limit   int
+	window  time.Duration
+	clients map[string]clientWindow
+}
+
+type clientWindow struct {
+	start time.Time
+	count int
+}
+
+func newClientWindowLimiter(limit int, window time.Duration) *clientWindowLimiter {
+	return &clientWindowLimiter{
+		limit:   limit,
+		window:  window,
+		clients: make(map[string]clientWindow),
+	}
+}
+
+func (l *clientWindowLimiter) Allow(key string, now time.Time) bool {
+	if l == nil || l.limit <= 0 || l.window <= 0 {
+		return true
+	}
+	if strings.TrimSpace(key) == "" {
+		key = "unknown"
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	entry, ok := l.clients[key]
+	if !ok || now.Sub(entry.start) >= l.window {
+		l.clients[key] = clientWindow{start: now, count: 1}
+		l.pruneLocked(now)
+		return true
+	}
+	if entry.count >= l.limit {
+		return false
+	}
+	entry.count++
+	l.clients[key] = entry
+	return true
+}
+
+func (l *clientWindowLimiter) pruneLocked(now time.Time) {
+	for key, entry := range l.clients {
+		if now.Sub(entry.start) >= l.window {
+			delete(l.clients, key)
+		}
+	}
+}
+
+func clientAddress(request *http.Request) string {
+	if request == nil {
+		return "unknown"
+	}
+	if forwarded := strings.TrimSpace(request.Header.Get("X-Forwarded-For")); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		if cleaned := strings.TrimSpace(parts[0]); cleaned != "" {
+			return cleaned
+		}
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(request.RemoteAddr))
+	if err != nil {
+		if cleaned := strings.TrimSpace(request.RemoteAddr); cleaned != "" {
+			return cleaned
+		}
+		return "unknown"
+	}
+	return host
 }
 
 func decodeParams(raw json.RawMessage, out any) error {
@@ -216,11 +383,7 @@ func decodeParams(raw json.RawMessage, out any) error {
 }
 
 func decodeRawTransaction(raw string) (core.Transaction, error) {
-	encoded := strings.TrimSpace(strings.TrimPrefix(raw, "0x"))
-	if encoded == "" {
-		return core.Transaction{}, fmt.Errorf("missing raw transaction payload")
-	}
-	bytes, err := hex.DecodeString(encoded)
+	bytes, err := decodeHexPayload(raw)
 	if err != nil {
 		return core.Transaction{}, err
 	}
@@ -229,6 +392,81 @@ func decodeRawTransaction(raw string) (core.Transaction, error) {
 		return core.Transaction{}, err
 	}
 	return tx, nil
+}
+
+func decodeHexPayload(raw string) ([]byte, error) {
+	encoded := strings.TrimSpace(strings.TrimPrefix(raw, "0x"))
+	if encoded == "" {
+		return nil, fmt.Errorf("missing hex payload")
+	}
+	return hex.DecodeString(encoded)
+}
+
+func decodeCallParams(raw json.RawMessage) (core.CallMessage, string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return core.CallMessage{}, "", fmt.Errorf("missing params")
+	}
+
+	var params callParams
+	blockRef := "latest"
+	if raw[0] == '[' {
+		var values []json.RawMessage
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return core.CallMessage{}, "", err
+		}
+		if len(values) == 0 {
+			return core.CallMessage{}, "", fmt.Errorf("missing params")
+		}
+		if err := json.Unmarshal(values[0], &params); err != nil {
+			return core.CallMessage{}, "", err
+		}
+		if len(values) > 1 && len(values[1]) > 0 && string(values[1]) != "null" {
+			if err := json.Unmarshal(values[1], &blockRef); err != nil {
+				return core.CallMessage{}, "", err
+			}
+		}
+	} else {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return core.CallMessage{}, "", err
+		}
+		if strings.TrimSpace(params.Block) != "" {
+			blockRef = params.Block
+		}
+	}
+
+	input, err := decodeHexPayload(params.Data)
+	if err != nil {
+		return core.CallMessage{}, "", err
+	}
+	value, err := parseCallValue(params.Value)
+	if err != nil {
+		return core.CallMessage{}, "", err
+	}
+	return core.CallMessage{
+		From:  strings.TrimSpace(params.From),
+		To:    strings.TrimSpace(params.To),
+		Data:  input,
+		Value: value,
+	}, blockRef, nil
+}
+
+func parseCallValue(raw string) (*big.Int, error) {
+	cleaned := strings.TrimSpace(strings.ToLower(raw))
+	if cleaned == "" {
+		return big.NewInt(0), nil
+	}
+	if strings.HasPrefix(cleaned, "0x") {
+		value, ok := new(big.Int).SetString(strings.TrimPrefix(cleaned, "0x"), 16)
+		if !ok {
+			return nil, fmt.Errorf("invalid call value")
+		}
+		return value, nil
+	}
+	value, ok := new(big.Int).SetString(cleaned, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid call value")
+	}
+	return value, nil
 }
 
 func parseBlockNumber(value string, latest uint64) (uint64, error) {

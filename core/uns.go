@@ -11,12 +11,38 @@ import (
 var (
 	ErrInvalidUNSCall = errors.New("core: invalid UNS contract call")
 
-	registerNameSelector = functionSelector("registerName(string)")
-	registerSelector     = functionSelector("register(string)")
+	registerNameSelector      = functionSelector("registerName(string)")
+	registerSelector          = functionSelector("register(string)")
+	registrationPriceSelector = functionSelector("registrationPrice(string)")
+	mentionFrequencySelector  = functionSelector("mentionFrequency(string)")
 )
 
 func EncodeRegisterNameCall(name string) ([]byte, error) {
-	normalized := strings.TrimSpace(name)
+	return encodeSingleStringCall(registerNameSelector, name)
+}
+
+func EncodeRegistrationPriceCall(name string) ([]byte, error) {
+	return encodeSingleStringCall(registrationPriceSelector, name)
+}
+
+func EncodeMentionFrequencyCall(term string) ([]byte, error) {
+	return encodeSingleStringCall(mentionFrequencySelector, term)
+}
+
+func DecodeRegisterNameCall(data []byte) (string, error) {
+	return decodeSingleStringCall(data, registerNameSelector, registerSelector)
+}
+
+func DecodeRegistrationPriceCall(data []byte) (string, error) {
+	return decodeSingleStringCall(data, registrationPriceSelector)
+}
+
+func DecodeMentionFrequencyCall(data []byte) (string, error) {
+	return decodeSingleStringCall(data, mentionFrequencySelector)
+}
+
+func encodeSingleStringCall(selector [4]byte, value string) ([]byte, error) {
+	normalized := strings.TrimSpace(value)
 	if normalized == "" {
 		return nil, ErrInvalidUNSCall
 	}
@@ -24,19 +50,26 @@ func EncodeRegisterNameCall(name string) ([]byte, error) {
 	stringData := []byte(normalized)
 	paddedLength := ((len(stringData) + 31) / 32) * 32
 	payload := make([]byte, 4+32+32+paddedLength)
-	copy(payload[:4], registerNameSelector[:])
+	copy(payload[:4], selector[:])
 	binary.BigEndian.PutUint64(payload[4+24:4+32], 32)
 	binary.BigEndian.PutUint64(payload[4+32+24:4+64], uint64(len(stringData)))
 	copy(payload[4+64:], stringData)
 	return payload, nil
 }
 
-func DecodeRegisterNameCall(data []byte) (string, error) {
+func decodeSingleStringCall(data []byte, selectors ...[4]byte) (string, error) {
 	if len(data) < 4+64 {
 		return "", ErrInvalidUNSCall
 	}
 	selector := data[:4]
-	if string(selector) != string(registerNameSelector[:]) && string(selector) != string(registerSelector[:]) {
+	matched := false
+	for _, candidate := range selectors {
+		if string(selector) == string(candidate[:]) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
 		return "", ErrInvalidUNSCall
 	}
 

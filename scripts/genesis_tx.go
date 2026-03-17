@@ -101,9 +101,15 @@ func main() {
 		logger.Fatalf("refusing genesis flow: latest block is already #%d", latest.Header.Number)
 	}
 
-	registrationFee, err := parseUFDAmount(defaultRegistrationFee)
+	registrationFee, err := client.namePrice("Architect")
 	if err != nil {
-		logger.Fatal(err)
+		registrationFee, err = parseUFDAmount(defaultRegistrationFee)
+		if err != nil {
+			logger.Fatal(err)
+		}
+		logger.Printf("native UNS price quote unavailable, falling back to default registration fee %s UFD", formatUFDAmount(registrationFee))
+	} else {
+		logger.Printf("quoted Architect UNS registration fee %s UFD from node", formatUFDAmount(registrationFee))
 	}
 	seedBaseBounty, err := parseUFDAmount(defaultSeedBaseBounty)
 	if err != nil {
@@ -291,6 +297,20 @@ func (c *rpcClient) balanceOf(address string) (*big.Int, error) {
 	value, ok := new(big.Int).SetString(strings.TrimSpace(result.Balance), 10)
 	if !ok {
 		return nil, fmt.Errorf("invalid balance returned by node")
+	}
+	return value, nil
+}
+
+func (c *rpcClient) namePrice(name string) (*big.Int, error) {
+	var result struct {
+		Price string `json:"price"`
+	}
+	if err := c.call("ufi_getNamePrice", map[string]string{"name": name}, &result); err != nil {
+		return nil, err
+	}
+	value, ok := new(big.Int).SetString(strings.TrimSpace(result.Price), 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid name price returned by node")
 	}
 	return value, nil
 }

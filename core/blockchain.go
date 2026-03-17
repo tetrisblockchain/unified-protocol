@@ -400,9 +400,56 @@ func (bc *Blockchain) GetSearchData(url, term string) SearchQueryResult {
 }
 
 func (bc *Blockchain) PrecompileMentionFrequency(term string) ([]byte, error) {
-	count := bc.MentionFrequency(term)
-	result := new(big.Int).SetUint64(count)
-	return padUint256(result), nil
+	input, err := EncodeMentionFrequencyCall(term)
+	if err != nil {
+		return nil, err
+	}
+	return bc.CallNativeContract(constants.SearchPrecompileAddress, input)
+}
+
+func (bc *Blockchain) CallNativeContract(to string, data []byte) ([]byte, error) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return CallNativeContract(bc.state, to, data)
+}
+
+func (bc *Blockchain) CallContract(call CallMessage, blockRef string) ([]byte, error) {
+	state, err := bc.stateForBlockRef(blockRef)
+	if err != nil {
+		return nil, err
+	}
+	if !IsNativeContractAddress(call.To) {
+		return nil, ErrUnsupportedNativeContract
+	}
+	return ExecuteReadOnlyCall(state, call)
+}
+
+func (bc *Blockchain) UNSRegistrationPrice(name string) (*big.Int, error) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return UNSRegistrationPriceFromState(bc.state, name)
+}
+
+func (bc *Blockchain) stateForBlockRef(blockRef string) (*StateSnapshot, error) {
+	ref := strings.TrimSpace(strings.ToLower(blockRef))
+	if ref == "" || ref == "latest" {
+		bc.mu.RLock()
+		defer bc.mu.RUnlock()
+		return bc.state.Clone(), nil
+	}
+
+	number, err := parseBlockReference(ref, bc.LatestBlock().Header.Number)
+	if err != nil {
+		return nil, err
+	}
+	block, err := bc.GetBlockByNumber(number)
+	if err != nil {
+		return nil, err
+	}
+
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.getStateSnapshotLocked(block.Hash)
 }
 
 func (bc *Blockchain) ResolveName(name string) (NameRecord, bool) {
@@ -802,24 +849,9 @@ func ApplyTransaction(state *StateSnapshot, tx Transaction) (AppliedTransaction,
 
 	switch normalized.Type {
 	case TxTypeTransfer:
-		if normalized.To == constants.UNSRegistryAddress {
-			name, err := DecodeRegisterNameCall(normalized.Data)
-			if err != nil {
+		if IsNativeContractAddress(normalized.To) {
+			if err := ExecuteNativeTransfer(state, normalized, value, netValue); err != nil {
 				return AppliedTransaction{}, err
-			}
-			normalizedName := normalizeUNSName(name)
-			if normalizedName == "" {
-				return AppliedTransaction{}, ErrInvalidTransaction
-			}
-			if _, exists := state.Names[normalizedName]; exists {
-				return AppliedTransaction{}, ErrInvalidTransaction
-			}
-			creditBalance(state.Balances, constants.UNSRegistryAddress, netValue)
-			state.Names[normalizedName] = NameRecord{
-				Name:         normalizedName,
-				Owner:        normalized.From,
-				RegisteredAt: normalized.Timestamp,
-				TxHash:       normalized.Hash,
 			}
 			break
 		}
@@ -1777,6 +1809,17 @@ func syntheticLatestMeta(block Block) BlockMeta {
 func hashKey(input string) string {
 	sum := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(sum[:])
+}
+
+func parseBlockReference(value string, latest uint64) (uint64, error) {
+	cleaned := strings.TrimSpace(strings.ToLower(value))
+	if cleaned == "" || cleaned == "latest" {
+		return latest, nil
+	}
+	if strings.HasPrefix(cleaned, "0x") {
+		return strconv.ParseUint(strings.TrimPrefix(cleaned, "0x"), 16, 64)
+	}
+	return strconv.ParseUint(cleaned, 10, 64)
 }
 
 func validateNonSystemAddress(address string) error {

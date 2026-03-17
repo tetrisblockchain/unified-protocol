@@ -117,6 +117,105 @@ func TestApplyTransactionRegistersUNSName(t *testing.T) {
 	}
 }
 
+func TestApplyTransactionUNSRegistrationUsesPopularityPrice(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	sender, err := types.NewAddressFromPubKey(publicKey)
+	if err != nil {
+		t.Fatalf("derive sender address: %v", err)
+	}
+
+	state := NewStateSnapshot()
+	state.Balances[sender.String()] = big.NewInt(300_000)
+	state.MentionCounts["architect"] = 2
+
+	callData, err := EncodeRegisterNameCall("Architect")
+	if err != nil {
+		t.Fatalf("encode register call: %v", err)
+	}
+
+	tx := Transaction{
+		Type:  TxTypeTransfer,
+		From:  sender.String(),
+		To:    constants.UNSRegistryAddress,
+		Value: "120000",
+		Nonce: 0,
+		Data:  callData,
+	}
+	if err := tx.Sign(privateKey); err != nil {
+		t.Fatalf("sign tx: %v", err)
+	}
+
+	applied, err := ApplyTransaction(state, tx)
+	if err != nil {
+		t.Fatalf("apply tx: %v", err)
+	}
+
+	if applied.ArchitectFee.String() != "3996" {
+		t.Fatalf("architect fee = %s, want 3996", applied.ArchitectFee.String())
+	}
+	if got := state.Balances[constants.UNSRegistryAddress].String(); got != "116004" {
+		t.Fatalf("registry balance = %s, want 116004", got)
+	}
+}
+
+func TestCallNativeContractReturnsUNSAndSearchQuotes(t *testing.T) {
+	state := NewStateSnapshot()
+	state.MentionCounts["architect"] = 3
+
+	searchInput, err := EncodeMentionFrequencyCall("Architect")
+	if err != nil {
+		t.Fatalf("EncodeMentionFrequencyCall returned error: %v", err)
+	}
+	searchOutput, err := CallNativeContract(state, constants.SearchPrecompileAddress, searchInput)
+	if err != nil {
+		t.Fatalf("CallNativeContract search returned error: %v", err)
+	}
+	if got := new(big.Int).SetBytes(searchOutput).String(); got != "3" {
+		t.Fatalf("search output = %s, want 3", got)
+	}
+
+	priceInput, err := EncodeRegistrationPriceCall("Architect")
+	if err != nil {
+		t.Fatalf("EncodeRegistrationPriceCall returned error: %v", err)
+	}
+	priceOutput, err := CallNativeContract(state, constants.UNSRegistryAddress, priceInput)
+	if err != nil {
+		t.Fatalf("CallNativeContract uns returned error: %v", err)
+	}
+	if got := new(big.Int).SetBytes(priceOutput).String(); got != "130000" {
+		t.Fatalf("uns output = %s, want 130000", got)
+	}
+}
+
+func TestBlockchainCallContractUsesBlockReference(t *testing.T) {
+	chain, err := OpenBlockchain(BlockchainConfig{
+		DataDir:         filepath.Join(t.TempDir(), "chain"),
+		GenesisBalances: map[string]*big.Int{},
+	})
+	if err != nil {
+		t.Fatalf("open blockchain: %v", err)
+	}
+	defer chain.Close()
+
+	input, err := EncodeRegistrationPriceCall("Architect")
+	if err != nil {
+		t.Fatalf("EncodeRegistrationPriceCall returned error: %v", err)
+	}
+	output, err := chain.CallContract(CallMessage{
+		To:   constants.UNSRegistryAddress,
+		Data: input,
+	}, "0x0")
+	if err != nil {
+		t.Fatalf("CallContract returned error: %v", err)
+	}
+	if got := new(big.Int).SetBytes(output).String(); got != "100000" {
+		t.Fatalf("CallContract output = %s, want 100000", got)
+	}
+}
+
 func TestMineBlockStoresSearchProofState(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {

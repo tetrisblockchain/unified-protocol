@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/big"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,18 +16,38 @@ import (
 
 const DefaultMiningInterval = 15 * time.Second
 
-var ErrAlreadyMining = errors.New("core: mining already in progress")
+const (
+	DefaultTxPoolLimit        = 4096
+	DefaultTaskPoolLimit      = 1024
+	DefaultSenderPendingLimit = 32
+	DefaultReplacementBumpBPS = 11000
+)
+
+var (
+	ErrAlreadyMining          = errors.New("core: mining already in progress")
+	ErrPoolFull               = errors.New("core: mempool is full")
+	ErrSenderQueueFull        = errors.New("core: sender pending limit reached")
+	ErrReplacementUnderpriced = errors.New("core: replacement transaction underpriced")
+)
 
 type TxPool struct {
-	mu      sync.Mutex
-	pending []Transaction
-	seen    map[string]struct{}
+	mu            sync.Mutex
+	pending       []Transaction
+	seen          map[string]struct{}
+	bySenderNonce map[string]string
+	senderCounts  map[string]int
+	limit         int
+	senderLimit   int
 }
 
 type TaskPool struct {
-	mu      sync.Mutex
-	pending []SearchTaskEnvelope
-	seen    map[string]struct{}
+	mu            sync.Mutex
+	pending       []SearchTaskEnvelope
+	seen          map[string]struct{}
+	bySenderNonce map[string]string
+	senderCounts  map[string]int
+	limit         int
+	senderLimit   int
 }
 
 type Engine struct {
@@ -44,11 +65,23 @@ type Engine struct {
 }
 
 func NewTxPool() *TxPool {
-	return &TxPool{seen: make(map[string]struct{})}
+	return &TxPool{
+		seen:          make(map[string]struct{}),
+		bySenderNonce: make(map[string]string),
+		senderCounts:  make(map[string]int),
+		limit:         DefaultTxPoolLimit,
+		senderLimit:   DefaultSenderPendingLimit,
+	}
 }
 
 func NewTaskPool() *TaskPool {
-	return &TaskPool{seen: make(map[string]struct{})}
+	return &TaskPool{
+		seen:          make(map[string]struct{}),
+		bySenderNonce: make(map[string]string),
+		senderCounts:  make(map[string]int),
+		limit:         DefaultTaskPoolLimit,
+		senderLimit:   DefaultSenderPendingLimit,
+	}
 }
 
 func NewEngine(blockchain *Blockchain, miner consensus.Miner, minerAddress string, logger *log.Logger) *Engine {
@@ -72,8 +105,33 @@ func (p *TxPool) Add(tx Transaction) error {
 	if _, ok := p.seen[tx.Hash]; ok {
 		return nil
 	}
+	key := senderNonceKey(tx.From, tx.Nonce)
+	if existingHash, ok := p.bySenderNonce[key]; ok {
+		index := p.indexOfHashLocked(existingHash)
+		if index < 0 {
+			delete(p.bySenderNonce, key)
+		} else {
+			existing := p.pending[index]
+			if !shouldReplace(existing.Value, tx.Value) {
+				return ErrReplacementUnderpriced
+			}
+			delete(p.seen, existingHash)
+			p.pending[index] = tx
+			p.seen[tx.Hash] = struct{}{}
+			p.bySenderNonce[key] = tx.Hash
+			return nil
+		}
+	}
+	if p.limit > 0 && len(p.pending) >= p.limit {
+		return ErrPoolFull
+	}
+	if p.senderLimit > 0 && p.senderCounts[tx.From] >= p.senderLimit {
+		return ErrSenderQueueFull
+	}
 	p.pending = append(p.pending, tx)
 	p.seen[tx.Hash] = struct{}{}
+	p.bySenderNonce[key] = tx.Hash
+	p.senderCounts[tx.From]++
 	return nil
 }
 
@@ -85,10 +143,8 @@ func (p *TxPool) Drain(limit int) []Transaction {
 		limit = len(p.pending)
 	}
 	out := append([]Transaction(nil), p.pending[:limit]...)
-	for _, tx := range out {
-		delete(p.seen, tx.Hash)
-	}
 	p.pending = append([]Transaction(nil), p.pending[limit:]...)
+	p.rebuildIndicesLocked()
 	return out
 }
 
@@ -98,8 +154,33 @@ func (p *TaskPool) Add(task SearchTaskEnvelope) error {
 	if _, ok := p.seen[task.Transaction.Hash]; ok {
 		return nil
 	}
+	key := senderNonceKey(task.Transaction.From, task.Transaction.Nonce)
+	if existingHash, ok := p.bySenderNonce[key]; ok {
+		index := p.indexOfHashLocked(existingHash)
+		if index < 0 {
+			delete(p.bySenderNonce, key)
+		} else {
+			existing := p.pending[index]
+			if !shouldReplace(existing.Transaction.Value, task.Transaction.Value) {
+				return ErrReplacementUnderpriced
+			}
+			delete(p.seen, existingHash)
+			p.pending[index] = task
+			p.seen[task.Transaction.Hash] = struct{}{}
+			p.bySenderNonce[key] = task.Transaction.Hash
+			return nil
+		}
+	}
+	if p.limit > 0 && len(p.pending) >= p.limit {
+		return ErrPoolFull
+	}
+	if p.senderLimit > 0 && p.senderCounts[task.Transaction.From] >= p.senderLimit {
+		return ErrSenderQueueFull
+	}
 	p.pending = append(p.pending, task)
 	p.seen[task.Transaction.Hash] = struct{}{}
+	p.bySenderNonce[key] = task.Transaction.Hash
+	p.senderCounts[task.Transaction.From]++
 	return nil
 }
 
@@ -117,10 +198,8 @@ func (p *TaskPool) DrainHighestValue(limit int) []SearchTaskEnvelope {
 		limit = len(p.pending)
 	}
 	out := append([]SearchTaskEnvelope(nil), p.pending[:limit]...)
-	for _, task := range out {
-		delete(p.seen, task.Transaction.Hash)
-	}
 	p.pending = append([]SearchTaskEnvelope(nil), p.pending[limit:]...)
+	p.rebuildIndicesLocked()
 	return out
 }
 
@@ -131,8 +210,30 @@ func (p *TaskPool) Requeue(tasks []SearchTaskEnvelope) {
 		if _, ok := p.seen[task.Transaction.Hash]; ok {
 			continue
 		}
+		key := senderNonceKey(task.Transaction.From, task.Transaction.Nonce)
+		if existingHash, ok := p.bySenderNonce[key]; ok {
+			index := p.indexOfHashLocked(existingHash)
+			if index >= 0 {
+				if !shouldReplace(p.pending[index].Transaction.Value, task.Transaction.Value) {
+					continue
+				}
+				delete(p.seen, existingHash)
+				p.pending[index] = task
+				p.seen[task.Transaction.Hash] = struct{}{}
+				p.bySenderNonce[key] = task.Transaction.Hash
+				continue
+			}
+		}
+		if p.limit > 0 && len(p.pending) >= p.limit {
+			break
+		}
+		if p.senderLimit > 0 && p.senderCounts[task.Transaction.From] >= p.senderLimit {
+			continue
+		}
 		p.pending = append(p.pending, task)
 		p.seen[task.Transaction.Hash] = struct{}{}
+		p.bySenderNonce[key] = task.Transaction.Hash
+		p.senderCounts[task.Transaction.From]++
 	}
 }
 
@@ -275,4 +376,62 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 	}
 
 	return e.Blockchain.MineBlock(e.MinerAddress, blockTransactions, crawlProofs)
+}
+
+func (p *TxPool) indexOfHashLocked(hash string) int {
+	for index, tx := range p.pending {
+		if tx.Hash == hash {
+			return index
+		}
+	}
+	return -1
+}
+
+func (p *TxPool) rebuildIndicesLocked() {
+	p.seen = make(map[string]struct{}, len(p.pending))
+	p.bySenderNonce = make(map[string]string, len(p.pending))
+	p.senderCounts = make(map[string]int)
+	for _, tx := range p.pending {
+		p.seen[tx.Hash] = struct{}{}
+		p.bySenderNonce[senderNonceKey(tx.From, tx.Nonce)] = tx.Hash
+		p.senderCounts[tx.From]++
+	}
+}
+
+func (p *TaskPool) indexOfHashLocked(hash string) int {
+	for index, task := range p.pending {
+		if task.Transaction.Hash == hash {
+			return index
+		}
+	}
+	return -1
+}
+
+func (p *TaskPool) rebuildIndicesLocked() {
+	p.seen = make(map[string]struct{}, len(p.pending))
+	p.bySenderNonce = make(map[string]string, len(p.pending))
+	p.senderCounts = make(map[string]int)
+	for _, task := range p.pending {
+		p.seen[task.Transaction.Hash] = struct{}{}
+		p.bySenderNonce[senderNonceKey(task.Transaction.From, task.Transaction.Nonce)] = task.Transaction.Hash
+		p.senderCounts[task.Transaction.From]++
+	}
+}
+
+func senderNonceKey(sender string, nonce uint64) string {
+	return sender + "#" + strconv.FormatUint(nonce, 10)
+}
+
+func shouldReplace(currentValue, nextValue string) bool {
+	current, ok := new(big.Int).SetString(currentValue, 10)
+	if !ok {
+		return false
+	}
+	next, ok := new(big.Int).SetString(nextValue, 10)
+	if !ok {
+		return false
+	}
+	required := new(big.Int).Mul(current, new(big.Int).SetUint64(uint64(DefaultReplacementBumpBPS)))
+	required.Quo(required, new(big.Int).SetUint64(constants.BasisPoints))
+	return next.Cmp(required) >= 0
 }

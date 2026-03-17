@@ -7,6 +7,8 @@ const (
 	SearchPrecompileAddress  = "0x101"
 	UNSRegistryAddress       = "0x102"
 	GenesisTimestampUnix     = int64(1735689600)
+	UNSBasePriceUnits        = int64(100000)
+	UNSPopularityPriceUnits  = int64(10000)
 	ArchitectFeeNumerator    = int64(333)
 	ArchitectFeeDenominator  = int64(10000)
 	BasisPoints              = uint64(10000)
@@ -14,6 +16,14 @@ const (
 	GovernanceProposalBlocks = uint64(40320)
 	GovernanceQuorumBPS      = uint64(1000)
 )
+
+func UNSBasePrice() *big.Int {
+	return big.NewInt(UNSBasePriceUnits)
+}
+
+func UNSPopularityMultiplier() *big.Int {
+	return big.NewInt(UNSPopularityPriceUnits)
+}
 
 func ArchitectFee(amount *big.Int) *big.Int {
 	if amount == nil || amount.Sign() <= 0 {

@@ -4,18 +4,38 @@ UniFied is an experimental Layer 1 prototype for Proof of Useful Work search ind
 
 ## Current Components
 
+- `setup.sh` and `Makefile`: root-level workspace bootstrap, build, test, run, and genesis helpers for the active daemon.
 - `cmd/unified-node`: persistent node daemon with BadgerDB-backed chain state, JSON-RPC, governance endpoints, and libp2p networking.
 - `cmd/unified-cli`: governance CLI for listing proposals and casting votes.
-- `core/blockchain.go`: ledger persistence, transaction/state transitions, search index storage, and architect fee enforcement.
+- `core/blockchain.go`: ledger persistence, transaction/state transitions, search index storage, native `0x101`/`0x102` contract routing, and architect fee enforcement.
 - `core/engine.go`: mempools plus the PoUW mining loop.
-- `api/rpc_server.go`: JSON-RPC methods for balances, transfers, blocks, search task submission, and local search-index reads.
+- `api/rpc_server.go`: JSON-RPC methods for balances, transfers, blocks, search task submission, local search-index reads, and native contract reads.
 - `contracts/UNS.sol`: UNS registry contract that prices names from the `0x101` search precompile mention frequency.
 
 ## Launch Readiness
 
-- `Improved`: remote blocks now pass local PoUW validator-quorum checks before import, peers can sync missing blocks over libp2p, governance state survives node restarts, and the node persists side branches with cumulative-work-based reorgs onto the heavier canonical chain.
-- `Still missing`: peer/mempool abuse controls are still minimal, and the cumulative-work model is still a prototype weighting scheme rather than a hardened adversarial mainnet metric.
+- `Improved`: remote blocks now pass local PoUW validator-quorum checks before import, peers can sync missing blocks over libp2p, governance state survives node restarts, the node persists side branches with cumulative-work-based reorgs onto the heavier canonical chain, and ingress paths now enforce bounded mempools plus basic RPC/P2P rate limits.
+- `Still missing`: advanced peer reputation, adaptive abuse controls, and a hardened cumulative-work metric are still missing; the current limits are baseline protections rather than a full adversarial networking model.
 - `Operational requirement`: all nodes on the same network must share the same genesis configuration, especially `--genesis-address` and circulating supply, or they will form incompatible chains.
+
+## Workspace Setup
+
+Bootstrap dependencies and local directories:
+
+```bash
+./setup.sh
+```
+
+Common targets:
+
+```bash
+make test
+make build
+make run-node
+make run-mine
+```
+
+The full operator runbook is in `docs/runbook.md`.
 
 ## Run The Node
 
@@ -70,9 +90,41 @@ curl -s -X POST http://127.0.0.1:8545/rpc \
   -d '{"jsonrpc":"2.0","id":3,"method":"ufi_getSearchData","params":{"url":"https://example.edu","term":"search"}}'
 ```
 
+Quote the current UNS registration price:
+
+```bash
+curl -s -X POST http://127.0.0.1:8545/rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"ufi_getNamePrice","params":{"name":"Architect"}}'
+```
+
+Call the native `0x101` search precompile directly:
+
+```bash
+curl -s -X POST http://127.0.0.1:8545/rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":5,"method":"ufi_callNative","params":{"to":"0x101","data":"0x1e6f732d000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000094172636869746563740000000000000000000000000000000000000000000000"}}'
+```
+
+Use the generic read-only call path:
+
+```bash
+curl -s -X POST http://127.0.0.1:8545/rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":6,"method":"ufi_call","params":{"to":"0x102","data":"0x8bdd48cc000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000094172636869746563740000000000000000000000000000000000000000000000","block":"latest"}}'
+```
+
+Compatibility-style `eth_call` also works:
+
+```bash
+curl -s -X POST http://127.0.0.1:8545/rpc \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":7,"method":"eth_call","params":[{"to":"0x102","data":"0x8bdd48cc000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000094172636869746563740000000000000000000000000000000000000000000000"},"0x0"]}'
+```
+
 ## Genesis Script
 
-The genesis bootstrap script signs the Architect UNS registration locally, broadcasts it through `ufi_sendRawTransaction`, waits for block `#1`, and then submits the first crawl seed task.
+The genesis bootstrap script now asks the node for the live UNS registration quote, signs the Architect registration locally, broadcasts it through `ufi_sendRawTransaction`, waits for block `#1`, and then submits the first crawl seed task.
 
 Run the node with the Architect address used as the shared genesis address, then execute:
 

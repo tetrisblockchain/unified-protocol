@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	libp2p "github.com/libp2p/go-libp2p"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -18,8 +21,15 @@ import (
 )
 
 const (
-	BlocksTopic       = "ufi-blocks"
-	ChainSyncProtocol = protocol.ID("/ufi/chain-sync/1.0.0")
+	BlocksTopic              = "ufi-blocks"
+	ChainSyncProtocol        = protocol.ID("/ufi/chain-sync/1.0.0")
+	MaxGossipBlockBytes      = 4 << 20
+	MaxChainSyncBatchSize    = 64
+	MaxChainSyncRequestBytes = 4 << 10
+	DefaultPeerBlockLimit    = 48
+	DefaultPeerSyncLimit     = 24
+	DefaultPeerLimitWindow   = time.Minute
+	DefaultP2PStreamTimeout  = 10 * time.Second
 )
 
 type ChainSyncProvider interface {
@@ -40,6 +50,8 @@ type P2PNode struct {
 	logger        *log.Logger
 	chainProvider ChainSyncProvider
 	onBlock       func(Block) error
+	blockLimiter  *peerWindowLimiter
+	syncLimiter   *peerWindowLimiter
 }
 
 type chainSyncRequest struct {
@@ -90,6 +102,8 @@ func NewP2PNode(ctx context.Context, config P2PConfig, logger *log.Logger, chain
 		logger:        logger,
 		chainProvider: chainProvider,
 		onBlock:       onBlock,
+		blockLimiter:  newPeerWindowLimiter(DefaultPeerBlockLimit, DefaultPeerLimitWindow),
+		syncLimiter:   newPeerWindowLimiter(DefaultPeerSyncLimit, DefaultPeerLimitWindow),
 	}
 	host.SetStreamHandler(ChainSyncProtocol, node.handleChainSync)
 
@@ -112,6 +126,14 @@ func (p *P2PNode) Start(ctx context.Context) {
 				return
 			}
 			if message.ReceivedFrom == p.host.ID() {
+				continue
+			}
+			if len(message.Data) > MaxGossipBlockBytes {
+				p.logger.Printf("discarding oversized block gossip from %s", message.ReceivedFrom)
+				continue
+			}
+			if p.blockLimiter != nil && !p.blockLimiter.Allow(message.ReceivedFrom, time.Now()) {
+				p.logger.Printf("rate limiting block gossip from %s", message.ReceivedFrom)
 				continue
 			}
 
@@ -245,6 +267,7 @@ func (p *P2PNode) requestBlocks(ctx context.Context, peerID peer.ID, startNumber
 		return chainSyncResponse{}, err
 	}
 	defer stream.Close()
+	_ = stream.SetDeadline(time.Now().Add(DefaultP2PStreamTimeout))
 
 	request := chainSyncRequest{
 		StartNumber: startNumber,
@@ -252,6 +275,9 @@ func (p *P2PNode) requestBlocks(ctx context.Context, peerID peer.ID, startNumber
 	}
 	if request.Limit <= 0 {
 		request.Limit = DefaultSyncBatchSize
+	}
+	if request.Limit > MaxChainSyncBatchSize {
+		request.Limit = MaxChainSyncBatchSize
 	}
 
 	if err := json.NewEncoder(stream).Encode(request); err != nil {
@@ -271,14 +297,23 @@ func (p *P2PNode) handleChainSync(stream network.Stream) {
 		_ = json.NewEncoder(stream).Encode(chainSyncResponse{Error: "chain sync unavailable"})
 		return
 	}
+	_ = stream.SetDeadline(time.Now().Add(DefaultP2PStreamTimeout))
+	remotePeer := stream.Conn().RemotePeer()
+	if p.syncLimiter != nil && !p.syncLimiter.Allow(remotePeer, time.Now()) {
+		_ = json.NewEncoder(stream).Encode(chainSyncResponse{Error: "rate limited"})
+		return
+	}
 
 	var request chainSyncRequest
-	if err := json.NewDecoder(stream).Decode(&request); err != nil {
+	if err := json.NewDecoder(io.LimitReader(stream, MaxChainSyncRequestBytes)).Decode(&request); err != nil {
 		_ = json.NewEncoder(stream).Encode(chainSyncResponse{Error: err.Error()})
 		return
 	}
 	if request.Limit <= 0 {
 		request.Limit = DefaultSyncBatchSize
+	}
+	if request.Limit > MaxChainSyncBatchSize {
+		request.Limit = MaxChainSyncBatchSize
 	}
 
 	latest := p.chainProvider.LatestBlock()
@@ -307,4 +342,57 @@ func sortStrings(values []string) {
 		return
 	}
 	sort.Strings(values)
+}
+
+type peerWindowLimiter struct {
+	mu      sync.Mutex
+	limit   int
+	window  time.Duration
+	entries map[peer.ID]peerWindow
+}
+
+type peerWindow struct {
+	start time.Time
+	count int
+}
+
+func newPeerWindowLimiter(limit int, window time.Duration) *peerWindowLimiter {
+	return &peerWindowLimiter{
+		limit:   limit,
+		window:  window,
+		entries: make(map[peer.ID]peerWindow),
+	}
+}
+
+func (l *peerWindowLimiter) Allow(id peer.ID, now time.Time) bool {
+	if l == nil || l.limit <= 0 || l.window <= 0 {
+		return true
+	}
+	if id == "" {
+		return false
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	entry, ok := l.entries[id]
+	if !ok || now.Sub(entry.start) >= l.window {
+		l.entries[id] = peerWindow{start: now, count: 1}
+		l.pruneLocked(now)
+		return true
+	}
+	if entry.count >= l.limit {
+		return false
+	}
+	entry.count++
+	l.entries[id] = entry
+	return true
+}
+
+func (l *peerWindowLimiter) pruneLocked(now time.Time) {
+	for id, entry := range l.entries {
+		if now.Sub(entry.start) >= l.window {
+			delete(l.entries, id)
+		}
+	}
 }

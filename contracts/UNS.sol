@@ -7,7 +7,7 @@ interface IUFDToken {
 }
 
 contract UNS {
-    uint256 public constant BASE_PRICE = 100 ether;
+    uint256 public constant BASE_PRICE = 10 ether;
     uint256 public constant POPULARITY_MULTIPLIER = 1 ether;
     uint256 public constant ARCHITECT_FEE_BPS = 333;
     uint256 public constant BASIS_POINTS = 10000;
