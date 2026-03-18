@@ -2,7 +2,9 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ROOT_DIR="${UNIFIED_SOURCE_ROOT:-$DEFAULT_ROOT_DIR}"
 SERVICE_NAME="${UNIFIED_SERVICE_NAME:-unified-seed-node}"
 SYSTEM_USER="${UNIFIED_SYSTEM_USER:-unified}"
 SYSTEM_GROUP="${UNIFIED_SYSTEM_GROUP:-unified}"
@@ -30,8 +32,9 @@ START_SERVICE="${UNIFIED_START_SERVICE:-0}"
 OVERWRITE_ENV="${UNIFIED_OVERWRITE_ENV:-0}"
 DRY_RUN="${UNIFIED_DRY_RUN:-0}"
 
-ENV_TEMPLATE="$ROOT_DIR/deploy/env/unified-seed-node.env.tmpl"
-UNIT_TEMPLATE="$ROOT_DIR/deploy/systemd/unified-seed-node.service.tmpl"
+BUILD_PACKAGE="${UNIFIED_BUILD_PACKAGE:-}"
+ENV_TEMPLATE=""
+UNIT_TEMPLATE=""
 
 usage() {
 	cat <<'EOF'
@@ -46,6 +49,8 @@ Relevant environment variables:
   UNIFIED_SYSTEM_GROUP
   UNIFIED_INSTALL_PREFIX
   UNIFIED_BINARY_PATH
+  UNIFIED_SOURCE_ROOT
+  UNIFIED_BUILD_PACKAGE
   UNIFIED_CONFIG_DIR
   UNIFIED_ENV_FILE
   UNIFIED_UNIT_PATH
@@ -95,6 +100,46 @@ require_command() {
 		echo "Missing required dependency: $1" >&2
 		exit 1
 	}
+}
+
+configure_source_layout() {
+	local candidate template_base
+
+	if [[ -n "$BUILD_PACKAGE" ]]; then
+		if [[ ! -d "${ROOT_DIR}/${BUILD_PACKAGE#./}" ]]; then
+			echo "Configured build package not found under ${ROOT_DIR}: ${BUILD_PACKAGE}" >&2
+			exit 1
+		fi
+	else
+		for candidate in "./cmd/unified-node" "./unified-protocol/cmd/unified-node"; do
+			if [[ -d "${ROOT_DIR}/${candidate#./}" ]]; then
+				BUILD_PACKAGE="$candidate"
+				break
+			fi
+		done
+	fi
+
+	if [[ -z "$BUILD_PACKAGE" ]]; then
+		echo "Could not find a node source package under ${ROOT_DIR}." >&2
+		echo "Expected one of:" >&2
+		echo "  ${ROOT_DIR}/cmd/unified-node" >&2
+		echo "  ${ROOT_DIR}/unified-protocol/cmd/unified-node" >&2
+		echo "Set UNIFIED_SOURCE_ROOT or UNIFIED_BUILD_PACKAGE if your checkout is elsewhere." >&2
+		exit 1
+	fi
+
+	for template_base in "${ROOT_DIR}/deploy" "${DEFAULT_ROOT_DIR}/deploy"; do
+		if [[ -f "${template_base}/env/unified-seed-node.env.tmpl" && -f "${template_base}/systemd/unified-seed-node.service.tmpl" ]]; then
+			ENV_TEMPLATE="${template_base}/env/unified-seed-node.env.tmpl"
+			UNIT_TEMPLATE="${template_base}/systemd/unified-seed-node.service.tmpl"
+			break
+		fi
+	done
+
+	if [[ -z "$ENV_TEMPLATE" || -z "$UNIT_TEMPLATE" ]]; then
+		echo "Missing installer templates under ${ROOT_DIR}/deploy or ${DEFAULT_ROOT_DIR}/deploy" >&2
+		exit 1
+	fi
 }
 
 parse_go_version() {
@@ -191,14 +236,14 @@ build_binary() {
 	trap 'rm -rf "$tempdir"' RETURN
 
 	if [[ "$DRY_RUN" == "1" ]]; then
-		echo "[dry-run] (cd $ROOT_DIR && go build -trimpath -o $tempbin ./cmd/unified-node)"
+		echo "[dry-run] (cd $ROOT_DIR && go build -trimpath -o $tempbin $BUILD_PACKAGE)"
 		echo "[dry-run] install -m 0755 $tempbin $BINARY_PATH"
 		return 0
 	fi
 
 	(
 		cd "$ROOT_DIR"
-		go build -trimpath -o "$tempbin" ./cmd/unified-node
+		go build -trimpath -o "$tempbin" "$BUILD_PACKAGE"
 	)
 	run_cmd install -d -m 0755 "$(dirname "$BINARY_PATH")"
 	run_cmd install -m 0755 "$tempbin" "$BINARY_PATH"
@@ -321,12 +366,9 @@ if ! check_go_version; then
 	exit 1
 fi
 
-if [[ ! -f "$ENV_TEMPLATE" || ! -f "$UNIT_TEMPLATE" ]]; then
-	echo "Missing installer templates under $ROOT_DIR/deploy" >&2
-	exit 1
-fi
+configure_source_layout
 
-log "building unified-node from $ROOT_DIR"
+log "building unified-node from $ROOT_DIR using $BUILD_PACKAGE"
 build_binary
 log "ensuring system user and directories"
 ensure_group
