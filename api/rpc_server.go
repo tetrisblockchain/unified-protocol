@@ -197,6 +197,10 @@ func (s *RPCServer) handle(r rpcRequest) (any, *rpcError) {
 			return nil, rpcFailure(err)
 		}
 		return fmt.Sprintf("0x%x", nonce), nil
+	case "ufi_getNetworkConfig":
+		return s.Blockchain.NetworkConfig(), nil
+	case "eth_chainId":
+		return fmt.Sprintf("0x%x", s.Blockchain.NetworkConfig().ChainID), nil
 	case "ufi_getContract":
 		var params getContractParams
 		if err := decodeParams(r.Params, &params); err != nil {

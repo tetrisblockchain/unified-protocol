@@ -1,0 +1,20 @@
+https://arxiv.org/list/cs/new,artificial intelligence research
+https://github.com/trending,trending open source code
+https://w3.org,web standards and protocols
+https://ietf.org,internet engineering task force
+https://mit.edu,massachusetts institute of technology
+https://stanford.edu,stanford university research
+https://nasa.gov/science,space and aeronautics data
+https://pubmed.ncbi.nlm.nih.gov,medical and life sciences
+https://nature.com,global scientific reports
+https://worldbank.org/data,global economic indicators
+https://sec.gov/edgar,corporate financial filings
+https://whitehouse.gov,us government transparency
+https://europa.eu,european union official data
+https://gutenberg.org,public domain literature
+https://wikipedia.org,human knowledge base
+https://news.ycombinator.com,hacker news technology trends
+https://techcrunch.com,venture capital and startups
+https://wired.com,digital culture and future tech
+https://reuters.com,global news integrity
+https://bloomberg.com,financial market data

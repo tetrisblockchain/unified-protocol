@@ -18,18 +18,21 @@ type ContractFunction struct {
 }
 
 type ContractRecord struct {
-	Address      string             `json:"address"`
-	Name         string             `json:"name"`
-	Kind         string             `json:"kind"`
-	Handler      string             `json:"handler"`
-	Code         string             `json:"code"`
-	CodeHash     string             `json:"codeHash"`
-	Description  string             `json:"description"`
-	System       bool               `json:"system"`
-	Executable   bool               `json:"executable"`
-	Functions    []ContractFunction `json:"functions"`
-	Source       string             `json:"source"`
-	StorageModel string             `json:"storageModel"`
+	Address         string             `json:"address"`
+	Name            string             `json:"name"`
+	Kind            string             `json:"kind"`
+	Handler         string             `json:"handler"`
+	Code            string             `json:"code"`
+	CodeHash        string             `json:"codeHash"`
+	Description     string             `json:"description"`
+	System          bool               `json:"system"`
+	Executable      bool               `json:"executable"`
+	GenesisDeployed bool               `json:"genesisDeployed"`
+	DeploymentBlock uint64             `json:"deploymentBlock"`
+	DeploymentModel string             `json:"deploymentModel"`
+	Functions       []ContractFunction `json:"functions"`
+	Source          string             `json:"source"`
+	StorageModel    string             `json:"storageModel"`
 }
 
 type systemContract struct {
@@ -161,16 +164,19 @@ func buildProtocolSystemContracts() map[string]systemContract {
 
 func buildSystemContractRecord(address, name, kind, handler, description, source, storageModel string, executable bool, functions []ContractFunction) ContractRecord {
 	record := ContractRecord{
-		Address:      strings.TrimSpace(address),
-		Name:         strings.TrimSpace(name),
-		Kind:         strings.TrimSpace(kind),
-		Handler:      strings.TrimSpace(handler),
-		Description:  strings.TrimSpace(description),
-		System:       true,
-		Executable:   executable,
-		Functions:    append([]ContractFunction(nil), functions...),
-		Source:       strings.TrimSpace(source),
-		StorageModel: strings.TrimSpace(storageModel),
+		Address:         strings.TrimSpace(address),
+		Name:            strings.TrimSpace(name),
+		Kind:            strings.TrimSpace(kind),
+		Handler:         strings.TrimSpace(handler),
+		Description:     strings.TrimSpace(description),
+		System:          true,
+		Executable:      executable,
+		GenesisDeployed: true,
+		DeploymentBlock: 0,
+		DeploymentModel: "native-protocol-contract",
+		Functions:       append([]ContractFunction(nil), functions...),
+		Source:          strings.TrimSpace(source),
+		StorageModel:    strings.TrimSpace(storageModel),
 	}
 	record.Code = buildDescriptorCode(record)
 	record.CodeHash = hashHex(strings.TrimPrefix(record.Code, "0x"))

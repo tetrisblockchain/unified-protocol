@@ -6,6 +6,7 @@ const (
 	GenesisArchitectAddress  = "UFI_GENESIS_ARCHITECT_REPLACE_ME"
 	SearchPrecompileAddress  = "0x101"
 	UNSRegistryAddress       = "0x102"
+	DefaultChainID           = uint64(333)
 	GenesisTimestampUnix     = int64(1735689600)
 	UNSBasePriceUnits        = int64(100000)
 	UNSPopularityPriceUnits  = int64(10000)

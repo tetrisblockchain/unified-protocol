@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RPC_HOST="${UFI_RPC_HOST:-127.0.0.1}"
 RPC_PORT="${UFI_RPC_PORT:-8545}"
 DATADIR="${UFI_DATADIR:-$ROOT_DIR/data/genesis-architect}"
+NETWORK_CONFIG="${UFI_NETWORK_CONFIG:-}"
 P2P_LISTEN="${UFI_P2P_LISTEN:-/ip4/0.0.0.0/tcp/0}"
 BOOTNODES="${UFI_BOOTNODES:-}"
 OPERATOR_ALIAS="${UFI_OPERATOR_ALIAS:-architect}"
@@ -135,12 +136,14 @@ echo "Node log: $NODE_LOG"
 cd "$ROOT_DIR"
 go run ./cmd/unified-node \
 	--mine \
+	--network-config "$NETWORK_CONFIG" \
 	--datadir "$DATADIR" \
 	--rpchost "$RPC_HOST" \
 	--rpcport "$RPC_PORT" \
 	--p2p-listen "$P2P_LISTEN" \
 	--bootnodes "$BOOTNODES" \
 	--genesis-address "$ARCH_ADDR" \
+	--architect-address "$ARCH_ADDR" \
 	--operator "$ARCH_ADDR" \
 	--operator-alias "$OPERATOR_ALIAS" \
 	--operator-voting-power "$OPERATOR_VOTING_POWER" \
@@ -152,7 +155,7 @@ echo "Started unified-node in background with PID $NODE_PID"
 wait_for_health
 echo "Node is healthy. Running genesis transaction."
 
-go run ./scripts/genesis_tx.go
+go run ./scripts/genesis_tx
 
 echo "Architect bootstrap complete. Node is still running in the background."
 echo "RPC endpoint: ${UFI_RPC_URL}"

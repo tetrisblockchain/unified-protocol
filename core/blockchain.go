@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,19 +29,29 @@ import (
 const (
 	SearchEscrowAddress = "UFI_SEARCH_ESCROW"
 
-	blockNumberPrefix  = "blocks/number/"
-	blockHashPrefix    = "blocks/hash/"
-	blockMetaPrefix    = "blocks/meta/"
-	txPrefix           = "tx/"
-	balancePrefix      = "state/balance/"
-	noncePrefix        = "state/nonce/"
-	searchPrefix       = "state/search/"
-	mentionPrefix      = "state/mention/"
-	taskPrefix         = "state/task/"
-	namePrefix         = "state/name/"
-	stateHistoryPrefix = "state/history/"
-	metaLatestHashKey  = "meta/latest_hash"
-	metaLatestBlockKey = "meta/latest_number"
+	searchTaskTxWorkUnits                = uint64(2)
+	maxProofWorkBodyBytes                = 32 << 10
+	maxProofWorkUniqueTerms              = 256
+	proofWorkTermBoostBPS                = uint64(15)
+	proofWorkBodyChunkBytes              = 128
+	maxProofWorkBodyBoostBPS             = uint64(2500)
+	maxProofWorkHostPenaltyFloorBPS      = uint64(2500)
+	maxProofWorkSubmitterPenaltyFloorBPS = uint64(4000)
+
+	blockNumberPrefix    = "blocks/number/"
+	blockHashPrefix      = "blocks/hash/"
+	blockMetaPrefix      = "blocks/meta/"
+	txPrefix             = "tx/"
+	balancePrefix        = "state/balance/"
+	noncePrefix          = "state/nonce/"
+	searchPrefix         = "state/search/"
+	mentionPrefix        = "state/mention/"
+	taskPrefix           = "state/task/"
+	namePrefix           = "state/name/"
+	stateHistoryPrefix   = "state/history/"
+	metaNetworkConfigKey = "meta/network_config"
+	metaLatestHashKey    = "meta/latest_hash"
+	metaLatestBlockKey   = "meta/latest_number"
 )
 
 var (
@@ -170,6 +181,7 @@ type BlockchainConfig struct {
 	DataDir         string
 	Logger          *log.Logger
 	GenesisBalances map[string]*big.Int
+	Network         NetworkConfig
 }
 
 type Blockchain struct {
@@ -179,6 +191,7 @@ type Blockchain struct {
 	state      *StateSnapshot
 	latest     Block
 	latestMeta BlockMeta
+	network    NetworkConfig
 	datadir    string
 }
 
@@ -281,6 +294,10 @@ func OpenBlockchain(config BlockchainConfig) (*Blockchain, error) {
 	if config.Logger == nil {
 		config.Logger = log.Default()
 	}
+	network, err := NormalizeNetworkConfig(config.Network)
+	if err != nil {
+		return nil, err
+	}
 
 	if err := os.MkdirAll(config.DataDir, 0o755); err != nil {
 		return nil, err
@@ -296,6 +313,7 @@ func OpenBlockchain(config BlockchainConfig) (*Blockchain, error) {
 		db:      db,
 		logger:  config.Logger,
 		state:   NewStateSnapshot(),
+		network: network,
 		datadir: config.DataDir,
 	}
 
@@ -305,6 +323,10 @@ func OpenBlockchain(config BlockchainConfig) (*Blockchain, error) {
 	}
 
 	if chain.latest.Hash == "" {
+		chain.network = network
+		if strings.TrimSpace(chain.network.GenesisAddress) == "" {
+			chain.network.GenesisAddress = inferGenesisAddress(config.GenesisBalances, chain.network.ArchitectAddress)
+		}
 		for address, balance := range config.GenesisBalances {
 			chain.state.Balances[address] = cloneBigInt(balance)
 		}
@@ -313,7 +335,7 @@ func OpenBlockchain(config BlockchainConfig) (*Blockchain, error) {
 				Number:     0,
 				ParentHash: "",
 				Timestamp:  time.Unix(constants.GenesisTimestampUnix, 0).UTC(),
-				Miner:      constants.GenesisArchitectAddress,
+				Miner:      chain.ArchitectAddress(),
 			},
 			Body: BlockBody{},
 		}
@@ -330,6 +352,20 @@ func OpenBlockchain(config BlockchainConfig) (*Blockchain, error) {
 			Canonical:      true,
 		}
 		if err := chain.persistCanonicalTipLocked(chain.state.Clone(), genesis, genesisMeta); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		return chain, nil
+	}
+
+	resolved, changed, err := reconcileNetworkConfig(chain.network, network, chain.latest)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	chain.network = resolved
+	if changed {
+		if err := chain.persistStateOnlyLocked(); err != nil {
 			_ = db.Close()
 			return nil, err
 		}
@@ -354,6 +390,18 @@ func (bc *Blockchain) LatestBlock() Block {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 	return bc.latest
+}
+
+func (bc *Blockchain) NetworkConfig() NetworkConfig {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.network.Clone()
+}
+
+func (bc *Blockchain) ArchitectAddress() string {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return normalizedArchitectAddress(bc.network.ArchitectAddress)
 }
 
 func (bc *Blockchain) PendingNonce(address string) uint64 {
@@ -433,6 +481,15 @@ func (bc *Blockchain) CallContract(call CallMessage, blockRef string) ([]byte, e
 }
 
 func (bc *Blockchain) ContractAt(address string) (ContractRecord, bool) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	cleaned := strings.TrimSpace(address)
+	for _, record := range bc.network.SystemContracts {
+		if record.Address == cleaned {
+			record.Functions = append([]ContractFunction(nil), record.Functions...)
+			return record, true
+		}
+	}
 	return SystemContractAt(address)
 }
 
@@ -445,7 +502,12 @@ func (bc *Blockchain) ContractCodeAt(address string) string {
 }
 
 func (bc *Blockchain) ListContracts() []ContractRecord {
-	return ListSystemContracts()
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	if len(bc.network.SystemContracts) == 0 {
+		return ListSystemContracts()
+	}
+	return cloneContractRecords(bc.network.SystemContracts)
 }
 
 func (bc *Blockchain) UNSRegistrationPrice(name string) (*big.Int, error) {
@@ -516,7 +578,7 @@ func (bc *Blockchain) ValidateTransaction(tx Transaction) error {
 	defer bc.mu.RUnlock()
 
 	snapshot := bc.state.Clone()
-	_, err := ApplyTransaction(snapshot, tx)
+	_, err := ApplyTransactionWithArchitect(snapshot, tx, bc.network.ArchitectAddress)
 	return err
 }
 
@@ -683,7 +745,7 @@ func (bc *Blockchain) MineBlock(miner string, transactions []Transaction, proofs
 		},
 	}
 
-	prepared, err := prepareBlock(parent, bc.state.Clone(), block)
+	prepared, err := prepareBlock(parent, bc.state.Clone(), block, bc.network.ArchitectAddress)
 	if err != nil {
 		return Block{}, err
 	}
@@ -726,7 +788,7 @@ func (bc *Blockchain) ImportBlock(block Block) error {
 		return err
 	}
 
-	prepared, err := prepareBlock(parent, parentState, block)
+	prepared, err := prepareBlock(parent, parentState, block, bc.network.ArchitectAddress)
 	if err != nil {
 		return err
 	}
@@ -750,7 +812,7 @@ type preparedBlock struct {
 	Work  *big.Int
 }
 
-func prepareBlock(parent Block, parentState *StateSnapshot, block Block) (preparedBlock, error) {
+func prepareBlock(parent Block, parentState *StateSnapshot, block Block, architectAddress string) (preparedBlock, error) {
 	if parentState == nil {
 		return preparedBlock{}, ErrInvalidBlock
 	}
@@ -764,7 +826,7 @@ func prepareBlock(parent Block, parentState *StateSnapshot, block Block) (prepar
 	snapshot := parentState.Clone()
 	normalizedTxs := make([]Transaction, 0, len(block.Body.Transactions))
 	for _, tx := range block.Body.Transactions {
-		result, err := ApplyTransaction(snapshot, tx)
+		result, err := ApplyTransactionWithArchitect(snapshot, tx, architectAddress)
 		if err != nil {
 			return preparedBlock{}, err
 		}
@@ -821,19 +883,99 @@ func prepareBlock(parent Block, parentState *StateSnapshot, block Block) (prepar
 }
 
 func computeBlockWork(stateAfterTransactions *StateSnapshot, transactions []Transaction, proofs []CrawlProof) (*big.Int, error) {
-	work := new(big.Int).SetUint64(uint64(len(transactions)))
+	work := big.NewInt(0)
+	for _, tx := range transactions {
+		txWork := uint64(1)
+		if tx.Type == TxTypeSearchTask {
+			txWork = searchTaskTxWorkUnits
+		}
+		work.Add(work, new(big.Int).SetUint64(txWork))
+	}
+
+	hostCounts := make(map[string]int)
+	submitterCounts := make(map[string]int)
 	for _, proof := range proofs {
 		record, ok := stateAfterTransactions.PendingTasks[strings.TrimSpace(proof.TaskID)]
 		if !ok {
 			return nil, ErrTaskNotFound
 		}
-		difficulty := record.Difficulty
-		if difficulty == 0 {
-			difficulty = 1
+		hostCounts[normalizeWorkHost(proof.URL)]++
+		submitterCounts[strings.TrimSpace(record.Submitter)]++
+	}
+	for _, proof := range proofs {
+		record, ok := stateAfterTransactions.PendingTasks[strings.TrimSpace(proof.TaskID)]
+		if !ok {
+			return nil, ErrTaskNotFound
 		}
-		work.Add(work, new(big.Int).SetUint64(difficulty))
+		proofWork := computeUsefulProofWork(
+			record,
+			proof,
+			hostCounts[normalizeWorkHost(proof.URL)],
+			submitterCounts[strings.TrimSpace(record.Submitter)],
+		)
+		work.Add(work, proofWork)
 	}
 	return work, nil
+}
+
+func computeUsefulProofWork(record SearchTaskRecord, proof CrawlProof, hostOccurrences, submitterOccurrences int) *big.Int {
+	difficulty := record.Difficulty
+	if difficulty == 0 {
+		difficulty = 1
+	}
+	base := new(big.Int).SetUint64(difficulty)
+
+	qualityBPS := usefulProofQualityBPS(proof)
+	hostPenalty := occurrencePenaltyBPS(hostOccurrences, maxProofWorkHostPenaltyFloorBPS)
+	submitterPenalty := occurrencePenaltyBPS(submitterOccurrences, maxProofWorkSubmitterPenaltyFloorBPS)
+	composite := constants.ComposeBasisPoints(qualityBPS, hostPenalty, submitterPenalty)
+	weighted := constants.ApplyBasisPoints(base, composite)
+	if weighted.Sign() <= 0 {
+		return big.NewInt(1)
+	}
+	return weighted
+}
+
+func usefulProofQualityBPS(proof CrawlProof) uint64 {
+	text := strings.TrimSpace(proof.Page.Title + " " + proof.Page.Snippet + " " + proof.Page.Body)
+	uniqueTerms := uint64(len(computeTermCounts(text)))
+	if uniqueTerms > maxProofWorkUniqueTerms {
+		uniqueTerms = maxProofWorkUniqueTerms
+	}
+
+	bodyBytes := len(proof.Page.Body) + len(proof.Page.Title) + len(proof.Page.Snippet)
+	if bodyBytes > maxProofWorkBodyBytes {
+		bodyBytes = maxProofWorkBodyBytes
+	}
+	bodyBoost := uint64(bodyBytes/proofWorkBodyChunkBytes) * 10
+	if bodyBoost > maxProofWorkBodyBoostBPS {
+		bodyBoost = maxProofWorkBodyBoostBPS
+	}
+
+	return constants.BasisPoints + uniqueTerms*proofWorkTermBoostBPS + bodyBoost
+}
+
+func occurrencePenaltyBPS(count int, floor uint64) uint64 {
+	if count <= 1 {
+		return constants.BasisPoints
+	}
+	penalty := constants.BasisPoints / uint64(count)
+	if penalty < floor {
+		return floor
+	}
+	return penalty
+}
+
+func normalizeWorkHost(rawURL string) string {
+	cleaned := strings.TrimSpace(strings.ToLower(rawURL))
+	if cleaned == "" {
+		return ""
+	}
+	parsed, err := url.Parse(cleaned)
+	if err == nil && parsed.Host != "" {
+		return strings.ToLower(parsed.Hostname())
+	}
+	return cleaned
 }
 
 func isPreferredTip(candidate, current BlockMeta) bool {
@@ -849,6 +991,10 @@ func isPreferredTip(candidate, current BlockMeta) bool {
 }
 
 func ApplyTransaction(state *StateSnapshot, tx Transaction) (AppliedTransaction, error) {
+	return ApplyTransactionWithArchitect(state, tx, constants.GenesisArchitectAddress)
+}
+
+func ApplyTransactionWithArchitect(state *StateSnapshot, tx Transaction, architectAddress string) (AppliedTransaction, error) {
 	normalized, err := normalizeTransaction(tx)
 	if err != nil {
 		return AppliedTransaction{}, err
@@ -876,9 +1022,10 @@ func ApplyTransaction(state *StateSnapshot, tx Transaction) (AppliedTransaction,
 
 	architectFee := constants.ArchitectFee(value)
 	netValue := new(big.Int).Sub(cloneBigInt(value), architectFee)
+	architectAddress = normalizedArchitectAddress(architectAddress)
 
 	debitBalance(state.Balances, normalized.From, value)
-	creditBalance(state.Balances, constants.GenesisArchitectAddress, architectFee)
+	creditBalance(state.Balances, architectAddress, architectFee)
 	state.Nonces[normalized.From] = normalized.Nonce + 1
 
 	result := AppliedTransaction{
@@ -895,7 +1042,7 @@ func ApplyTransaction(state *StateSnapshot, tx Transaction) (AppliedTransaction,
 			}
 			break
 		}
-		if err := validateNonSystemAddress(normalized.To); err != nil {
+		if err := validateNonSystemAddressWithArchitect(normalized.To, architectAddress); err != nil {
 			return AppliedTransaction{}, err
 		}
 		creditBalance(state.Balances, normalized.To, netValue)
@@ -1323,6 +1470,26 @@ func (bc *Blockchain) loadLocked() error {
 	bc.state = NewStateSnapshot()
 
 	if err := bc.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(metaNetworkConfigKey))
+		if err == nil {
+			if err := item.Value(func(value []byte) error {
+				var cfg NetworkConfig
+				if err := json.Unmarshal(value, &cfg); err != nil {
+					return err
+				}
+				normalized, err := NormalizeNetworkConfig(cfg)
+				if err != nil {
+					return err
+				}
+				bc.network = normalized
+				return nil
+			}); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+
 		if err := iteratePrefix(txn, []byte(balancePrefix), func(key, value []byte) error {
 			amount, ok := new(big.Int).SetString(string(value), 10)
 			if !ok {
@@ -1387,7 +1554,7 @@ func (bc *Blockchain) loadLocked() error {
 			return err
 		}
 
-		item, err := txn.Get([]byte(metaLatestBlockKey))
+		item, err = txn.Get([]byte(metaLatestBlockKey))
 		if err != nil {
 			if errors.Is(err, badger.ErrKeyNotFound) {
 				return nil
@@ -1442,6 +1609,9 @@ func (bc *Blockchain) persistCanonicalTipLocked(state *StateSnapshot, block Bloc
 		if err := rewriteCanonicalTip(txn, bc.latestMeta.Hash, meta.Hash); err != nil {
 			return err
 		}
+		if err := persistNetworkConfig(txn, bc.network); err != nil {
+			return err
+		}
 		if err := persistState(txn, state); err != nil {
 			return err
 		}
@@ -1464,6 +1634,9 @@ func (bc *Blockchain) persistCanonicalTipLocked(state *StateSnapshot, block Bloc
 
 func (bc *Blockchain) persistStateOnlyLocked() error {
 	return bc.db.Update(func(txn *badger.Txn) error {
+		if err := persistNetworkConfig(txn, bc.network); err != nil {
+			return err
+		}
 		if err := persistState(txn, bc.state); err != nil {
 			return err
 		}
@@ -1483,6 +1656,9 @@ func (bc *Blockchain) storeImportedBlockLocked(state *StateSnapshot, block Block
 			return nil
 		}
 		if err := rewriteCanonicalTip(txn, bc.latestMeta.Hash, meta.Hash); err != nil {
+			return err
+		}
+		if err := persistNetworkConfig(txn, bc.network); err != nil {
 			return err
 		}
 		if err := persistState(txn, state); err != nil {
@@ -1537,6 +1713,18 @@ func persistStateSnapshot(txn *badger.Txn, blockHash string, state *StateSnapsho
 		return err
 	}
 	return txn.Set([]byte(stateSnapshotKey(blockHash)), payload)
+}
+
+func persistNetworkConfig(txn *badger.Txn, config NetworkConfig) error {
+	normalized, err := NormalizeNetworkConfig(config)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(normalized)
+	if err != nil {
+		return err
+	}
+	return txn.Set([]byte(metaNetworkConfigKey), payload)
 }
 
 func rewriteCanonicalTip(txn *badger.Txn, oldTipHash, newTipHash string) error {
@@ -1862,12 +2050,151 @@ func parseBlockReference(value string, latest uint64) (uint64, error) {
 	return strconv.ParseUint(cleaned, 10, 64)
 }
 
+func inferGenesisAddress(balances map[string]*big.Int, architectAddress string) string {
+	selected := ""
+	var best *big.Int
+	for address, amount := range balances {
+		cleaned := strings.TrimSpace(address)
+		if cleaned == "" || cleaned == normalizedArchitectAddress(architectAddress) {
+			continue
+		}
+		value := cloneBigInt(amount)
+		if best == nil || value.Cmp(best) > 0 || (value.Cmp(best) == 0 && cleaned < selected) {
+			selected = cleaned
+			best = value
+		}
+	}
+	return selected
+}
+
+func reconcileNetworkConfig(stored, requested NetworkConfig, latest Block) (NetworkConfig, bool, error) {
+	if strings.TrimSpace(stored.Name) == "" &&
+		stored.ChainID == 0 &&
+		strings.TrimSpace(stored.ArchitectAddress) == "" &&
+		strings.TrimSpace(stored.GenesisAddress) == "" &&
+		strings.TrimSpace(stored.CirculatingSupply) == "" &&
+		len(stored.SystemContracts) == 0 {
+		stored = requested.Clone()
+		if legacyMiner := strings.TrimSpace(latest.Header.Miner); legacyMiner != "" {
+			requestedArchitect := strings.TrimSpace(requested.ArchitectAddress)
+			if requestedArchitect != "" &&
+				requestedArchitect != constants.GenesisArchitectAddress &&
+				requestedArchitect != legacyMiner {
+				return NetworkConfig{}, false, fmt.Errorf("core: existing chain architect address mismatch: existing=%s requested=%s", legacyMiner, requested.ArchitectAddress)
+			}
+			stored.ArchitectAddress = legacyMiner
+		}
+		normalized, err := NormalizeNetworkConfig(stored)
+		if err != nil {
+			return NetworkConfig{}, false, err
+		}
+		return normalized, true, nil
+	}
+
+	resolved := stored.Clone()
+	changed := false
+
+	if err := ensureNetworkValueMatchWithFallback("network architect address", resolved.ArchitectAddress, requested.ArchitectAddress, constants.GenesisArchitectAddress); err != nil {
+		return NetworkConfig{}, false, err
+	}
+	if err := ensureNetworkValueMatch("network genesis address", resolved.GenesisAddress, requested.GenesisAddress); err != nil {
+		return NetworkConfig{}, false, err
+	}
+	if err := ensureNetworkUintMatchWithFallback("network chain ID", resolved.ChainID, requested.ChainID, constants.DefaultChainID); err != nil {
+		return NetworkConfig{}, false, err
+	}
+	if err := ensureNetworkValueMatchWithFallback("network circulating supply", resolved.CirculatingSupply, requested.CirculatingSupply, DefaultNetworkConfig().CirculatingSupply); err != nil {
+		return NetworkConfig{}, false, err
+	}
+
+	if strings.TrimSpace(resolved.Name) == "" && strings.TrimSpace(requested.Name) != "" {
+		resolved.Name = requested.Name
+		changed = true
+	}
+	if strings.TrimSpace(resolved.GenesisAddress) == "" && strings.TrimSpace(requested.GenesisAddress) != "" {
+		resolved.GenesisAddress = requested.GenesisAddress
+		changed = true
+	}
+	if strings.TrimSpace(resolved.ArchitectAddress) == "" && strings.TrimSpace(requested.ArchitectAddress) != "" {
+		resolved.ArchitectAddress = requested.ArchitectAddress
+		changed = true
+	}
+	if resolved.ChainID == 0 && requested.ChainID != 0 {
+		resolved.ChainID = requested.ChainID
+		changed = true
+	}
+	if strings.TrimSpace(resolved.CirculatingSupply) == "" && strings.TrimSpace(requested.CirculatingSupply) != "" {
+		resolved.CirculatingSupply = requested.CirculatingSupply
+		changed = true
+	}
+	if len(resolved.Bootnodes) == 0 && len(requested.Bootnodes) > 0 {
+		resolved.Bootnodes = append([]string(nil), requested.Bootnodes...)
+		changed = true
+	}
+	if len(resolved.SystemContracts) == 0 && len(requested.SystemContracts) > 0 {
+		resolved.SystemContracts = cloneContractRecords(requested.SystemContracts)
+		changed = true
+	}
+
+	normalized, err := NormalizeNetworkConfig(resolved)
+	if err != nil {
+		return NetworkConfig{}, false, err
+	}
+	return normalized, changed, nil
+}
+
+func ensureNetworkValueMatch(label, stored, requested string) error {
+	stored = strings.TrimSpace(stored)
+	requested = strings.TrimSpace(requested)
+	if stored == "" || requested == "" || stored == requested {
+		return nil
+	}
+	return fmt.Errorf("core: %s mismatch: existing=%s requested=%s", label, stored, requested)
+}
+
+func ensureNetworkValueMatchWithFallback(label, stored, requested, fallback string) error {
+	requested = strings.TrimSpace(requested)
+	if requested == strings.TrimSpace(fallback) {
+		requested = ""
+	}
+	return ensureNetworkValueMatch(label, stored, requested)
+}
+
+func ensureNetworkUintMatch(label string, stored, requested uint64) error {
+	if stored == 0 || requested == 0 || stored == requested {
+		return nil
+	}
+	return fmt.Errorf("core: %s mismatch: existing=%d requested=%d", label, stored, requested)
+}
+
+func ensureNetworkUintMatchWithFallback(label string, stored, requested, fallback uint64) error {
+	if requested == fallback {
+		requested = 0
+	}
+	return ensureNetworkUintMatch(label, stored, requested)
+}
+
+func normalizedArchitectAddress(address string) string {
+	cleaned := strings.TrimSpace(address)
+	if cleaned == "" {
+		return constants.GenesisArchitectAddress
+	}
+	return cleaned
+}
+
 func validateNonSystemAddress(address string) error {
+	return validateNonSystemAddressWithArchitect(address, constants.GenesisArchitectAddress)
+}
+
+func validateNonSystemAddressWithArchitect(address, architectAddress string) error {
 	cleaned := strings.TrimSpace(address)
 	if cleaned == "" {
 		return ErrInvalidTransaction
 	}
-	if cleaned == constants.GenesisArchitectAddress || cleaned == SearchEscrowAddress || cleaned == constants.UNSRegistryAddress {
+	if cleaned == normalizedArchitectAddress(architectAddress) ||
+		cleaned == constants.GenesisArchitectAddress ||
+		cleaned == SearchEscrowAddress ||
+		cleaned == constants.UNSRegistryAddress {
 		return nil
 	}
 	_, err := types.ParseAddress(cleaned)

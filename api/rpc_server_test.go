@@ -254,9 +254,23 @@ func TestRPCServerGetTransactionCountReportsLatestAndPending(t *testing.T) {
 func TestRPCServerGetCodeAndContracts(t *testing.T) {
 	t.Parallel()
 
+	architectKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey returned error: %v", err)
+	}
+	architect, err := types.NewAddressFromPubKey(architectKey)
+	if err != nil {
+		t.Fatalf("NewAddressFromPubKey returned error: %v", err)
+	}
+
 	chain, err := core.OpenBlockchain(core.BlockchainConfig{
 		DataDir:         filepath.Join(t.TempDir(), "chain"),
 		GenesisBalances: map[string]*big.Int{},
+		Network: core.NetworkConfig{
+			Name:             "unified-mainnet",
+			ChainID:          4444,
+			ArchitectAddress: architect.String(),
+		},
 	})
 	if err != nil {
 		t.Fatalf("OpenBlockchain returned error: %v", err)
@@ -296,6 +310,28 @@ func TestRPCServerGetCodeAndContracts(t *testing.T) {
 	}
 	if !strings.Contains(listContractsResponse.Body.String(), `"address":"0x101"`) || !strings.Contains(listContractsResponse.Body.String(), `"address":"0x102"`) {
 		t.Fatalf("ufi_listContracts body = %s, want both system contracts", listContractsResponse.Body.String())
+	}
+
+	networkPayload := `{"jsonrpc":"2.0","id":12,"method":"ufi_getNetworkConfig","params":{}}`
+	networkRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(networkPayload))
+	networkResponse := httptest.NewRecorder()
+	server.ServeHTTP(networkResponse, networkRequest)
+	if networkResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_getNetworkConfig status = %d, want %d", networkResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(networkResponse.Body.String(), `"name":"unified-mainnet"`) || !strings.Contains(networkResponse.Body.String(), `"architectAddress":"`+architect.String()+`"`) {
+		t.Fatalf("ufi_getNetworkConfig body = %s, want network metadata", networkResponse.Body.String())
+	}
+
+	chainIDPayload := `{"jsonrpc":"2.0","id":13,"method":"eth_chainId","params":[]}`
+	chainIDRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(chainIDPayload))
+	chainIDResponse := httptest.NewRecorder()
+	server.ServeHTTP(chainIDResponse, chainIDRequest)
+	if chainIDResponse.Code != http.StatusOK {
+		t.Fatalf("eth_chainId status = %d, want %d", chainIDResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(chainIDResponse.Body.String(), `"result":"0x115c"`) {
+		t.Fatalf("eth_chainId body = %s, want 0x115c", chainIDResponse.Body.String())
 	}
 }
 

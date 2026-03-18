@@ -68,6 +68,60 @@ func TestApplyTransactionTransferRoutesArchitectFee(t *testing.T) {
 	}
 }
 
+func TestApplyTransactionWithArchitectUsesConfiguredAddress(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	sender, err := types.NewAddressFromPubKey(publicKey)
+	if err != nil {
+		t.Fatalf("derive sender address: %v", err)
+	}
+
+	recipientKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+	recipient, err := types.NewAddressFromPubKey(recipientKey)
+	if err != nil {
+		t.Fatalf("derive recipient address: %v", err)
+	}
+
+	architectKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate architect key: %v", err)
+	}
+	architect, err := types.NewAddressFromPubKey(architectKey)
+	if err != nil {
+		t.Fatalf("derive architect address: %v", err)
+	}
+
+	state := NewStateSnapshot()
+	state.Balances[sender.String()] = big.NewInt(10_000)
+
+	tx := Transaction{
+		Type:  TxTypeTransfer,
+		From:  sender.String(),
+		To:    recipient.String(),
+		Value: "3000",
+		Nonce: 0,
+	}
+	if err := tx.Sign(privateKey); err != nil {
+		t.Fatalf("sign tx: %v", err)
+	}
+
+	if _, err := ApplyTransactionWithArchitect(state, tx, architect.String()); err != nil {
+		t.Fatalf("apply tx: %v", err)
+	}
+
+	if got := state.Balances[architect.String()].String(); got != "99" {
+		t.Fatalf("configured architect balance = %s, want 99", got)
+	}
+	if got := state.Balances[constants.GenesisArchitectAddress]; got != nil {
+		t.Fatalf("legacy architect placeholder unexpectedly credited: %s", got.String())
+	}
+}
+
 func TestApplyTransactionRegistersUNSName(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -326,5 +380,94 @@ func TestMineBlockStoresSearchProofState(t *testing.T) {
 	}
 	if got := chain.GetBalance(constants.GenesisArchitectAddress).String(); got != architectFee.String() {
 		t.Fatalf("architect balance = %s, want %s", got, architectFee.String())
+	}
+}
+
+func TestBlockchainPersistsNetworkConfigAndRejectsArchitectMismatch(t *testing.T) {
+	genesisKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate genesis key: %v", err)
+	}
+	genesis, err := types.NewAddressFromPubKey(genesisKey)
+	if err != nil {
+		t.Fatalf("derive genesis address: %v", err)
+	}
+
+	architectKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate architect key: %v", err)
+	}
+	architect, err := types.NewAddressFromPubKey(architectKey)
+	if err != nil {
+		t.Fatalf("derive architect address: %v", err)
+	}
+
+	otherArchitectKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate second architect key: %v", err)
+	}
+	otherArchitect, err := types.NewAddressFromPubKey(otherArchitectKey)
+	if err != nil {
+		t.Fatalf("derive second architect address: %v", err)
+	}
+
+	dataDir := filepath.Join(t.TempDir(), "chain")
+	config := NetworkConfig{
+		Name:              "unified-mainnet",
+		ChainID:           4444,
+		GenesisAddress:    genesis.String(),
+		ArchitectAddress:  architect.String(),
+		CirculatingSupply: "500000",
+		Bootnodes:         []string{"/ip4/66.163.125.129/tcp/4001/p2p/12D3KooWTest"},
+	}
+
+	chain, err := OpenBlockchain(BlockchainConfig{
+		DataDir: dataDir,
+		GenesisBalances: map[string]*big.Int{
+			genesis.String(): big.NewInt(500_000),
+		},
+		Network: config,
+	})
+	if err != nil {
+		t.Fatalf("open blockchain: %v", err)
+	}
+	if err := chain.Close(); err != nil {
+		t.Fatalf("close blockchain: %v", err)
+	}
+
+	reopened, err := OpenBlockchain(BlockchainConfig{
+		DataDir:         dataDir,
+		GenesisBalances: map[string]*big.Int{},
+		Network:         config,
+	})
+	if err != nil {
+		t.Fatalf("reopen blockchain: %v", err)
+	}
+
+	network := reopened.NetworkConfig()
+	if network.Name != config.Name || network.ChainID != config.ChainID {
+		t.Fatalf("network config = %+v, want name=%s chainId=%d", network, config.Name, config.ChainID)
+	}
+	if network.GenesisAddress != config.GenesisAddress {
+		t.Fatalf("genesis address = %s, want %s", network.GenesisAddress, config.GenesisAddress)
+	}
+	if network.ArchitectAddress != config.ArchitectAddress {
+		t.Fatalf("architect address = %s, want %s", network.ArchitectAddress, config.ArchitectAddress)
+	}
+	if len(network.SystemContracts) < 2 {
+		t.Fatalf("system contracts len = %d, want at least 2", len(network.SystemContracts))
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close reopened blockchain: %v", err)
+	}
+
+	conflict := config
+	conflict.ArchitectAddress = otherArchitect.String()
+	if _, err := OpenBlockchain(BlockchainConfig{
+		DataDir:         dataDir,
+		GenesisBalances: map[string]*big.Int{},
+		Network:         conflict,
+	}); err == nil || !strings.Contains(err.Error(), "architect address mismatch") {
+		t.Fatalf("reopen with mismatched architect returned %v, want mismatch error", err)
 	}
 }

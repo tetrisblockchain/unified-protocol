@@ -1,0 +1,8 @@
+{
+  "name": "unified-mainnet",
+  "chainId": 333,
+  "genesisAddress": "UFI_MAINNET_GENESIS_REPLACE_ME",
+  "architectAddress": "UFI_MAINNET_ARCHITECT_REPLACE_ME",
+  "circulatingSupply": "1000000",
+  "bootnodes": []
+}

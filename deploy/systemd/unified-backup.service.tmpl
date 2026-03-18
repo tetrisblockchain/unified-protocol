@@ -1,0 +1,12 @@
+[Unit]
+Description=UniFied datadir backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User={{SYSTEM_USER}}
+Group={{SYSTEM_GROUP}}
+Environment=UNIFIED_BACKUP_RETENTION={{BACKUP_RETENTION}}
+ExecStart={{ROTATE_SCRIPT}} {{DATA_DIR}} {{BACKUP_DIR}}
+WorkingDirectory={{WORK_DIR}}

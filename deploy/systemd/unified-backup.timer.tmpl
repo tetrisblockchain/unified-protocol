@@ -1,0 +1,10 @@
+[Unit]
+Description=Run UniFied datadir backup on a schedule
+
+[Timer]
+OnCalendar={{ON_CALENDAR}}
+Persistent=true
+RandomizedDelaySec={{RANDOM_DELAY}}
+
+[Install]
+WantedBy=timers.target

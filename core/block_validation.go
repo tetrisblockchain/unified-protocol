@@ -23,10 +23,11 @@ var ErrForkNotPreferred = errors.New("core: fork not preferred by fork choice")
 type BlockImportValidator struct {
 	Validators       []consensus.ValidatorNode
 	PriorityRegistry *consensus.PriorityRegistry
+	ArchitectAddress string
 	Logger           *log.Logger
 }
 
-func NewLocalBlockImportValidator(crawler consensus.Crawler, registry *consensus.PriorityRegistry, logger *log.Logger) *BlockImportValidator {
+func NewLocalBlockImportValidator(crawler consensus.Crawler, registry *consensus.PriorityRegistry, architectAddress string, logger *log.Logger) *BlockImportValidator {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -43,6 +44,7 @@ func NewLocalBlockImportValidator(crawler consensus.Crawler, registry *consensus
 	return &BlockImportValidator{
 		Validators:       validators,
 		PriorityRegistry: registry,
+		ArchitectAddress: normalizedArchitectAddress(architectAddress),
 		Logger:           logger,
 	}
 }
@@ -57,7 +59,7 @@ func (v *BlockImportValidator) ValidateBlock(ctx context.Context, preState *Stat
 
 	snapshot := preState.Clone()
 	for _, tx := range block.Body.Transactions {
-		if _, err := ApplyTransaction(snapshot, tx); err != nil {
+		if _, err := ApplyTransactionWithArchitect(snapshot, tx, v.ArchitectAddress); err != nil {
 			return err
 		}
 	}

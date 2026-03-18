@@ -427,7 +427,7 @@ func (e *Engine) validatePendingTransaction(tx Transaction) error {
 	if err != nil {
 		return err
 	}
-	_, err = ApplyTransaction(snapshot, tx)
+	_, err = ApplyTransactionWithArchitect(snapshot, tx, e.Blockchain.ArchitectAddress())
 	return err
 }
 
@@ -442,7 +442,7 @@ func (e *Engine) pendingStateForSender(sender string) (*StateSnapshot, error) {
 		return nil, err
 	}
 	for _, tx := range pending {
-		if _, err := ApplyTransaction(snapshot, tx); err != nil {
+		if _, err := ApplyTransactionWithArchitect(snapshot, tx, e.Blockchain.ArchitectAddress()); err != nil {
 			return nil, err
 		}
 	}

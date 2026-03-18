@@ -5,19 +5,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ROOT_DIR="${UNIFIED_SOURCE_ROOT:-$DEFAULT_ROOT_DIR}"
-SERVICE_NAME="${UNIFIED_SERVICE_NAME:-unified-seed-node}"
-SYSTEM_USER="${UNIFIED_SYSTEM_USER:-unified}"
-SYSTEM_GROUP="${UNIFIED_SYSTEM_GROUP:-unified}"
+
+LABEL="${UNIFIED_LAUNCHD_LABEL:-io.unified.seed-node}"
 INSTALL_PREFIX="${UNIFIED_INSTALL_PREFIX:-/usr/local/bin}"
 BINARY_PATH="${UNIFIED_BINARY_PATH:-$INSTALL_PREFIX/unified-node}"
-CONFIG_DIR="${UNIFIED_CONFIG_DIR:-/etc/unified}"
-ENV_FILE="${UNIFIED_ENV_FILE:-$CONFIG_DIR/${SERVICE_NAME}.env}"
+CONFIG_DIR="${UNIFIED_CONFIG_DIR:-/usr/local/etc/unified}"
+ENV_FILE="${UNIFIED_ENV_FILE:-$CONFIG_DIR/unified-seed-node.env}"
 NETWORK_CONFIG_PATH="${UNIFIED_NETWORK_CONFIG:-$CONFIG_DIR/unified-network.json}"
 NETWORK_CONFIG_SOURCE="${UNIFIED_NETWORK_CONFIG_SOURCE:-}"
-UNIT_PATH="${UNIFIED_UNIT_PATH:-/etc/systemd/system/${SERVICE_NAME}.service}"
-DATA_DIR="${UNIFIED_DATA_DIR:-/var/lib/unified}"
-LOG_DIR="${UNIFIED_LOG_DIR:-/var/log/unified}"
+SUPPORT_DIR="${UNIFIED_SUPPORT_DIR:-/usr/local/libexec/unified}"
+WRAPPER_PATH="${UNIFIED_WRAPPER_PATH:-$SUPPORT_DIR/unified-seed-node-launch.sh}"
+PLIST_PATH="${UNIFIED_PLIST_PATH:-/Library/LaunchDaemons/${LABEL}.plist}"
+DATA_DIR="${UNIFIED_DATA_DIR:-/usr/local/var/lib/unified}"
+LOG_DIR="${UNIFIED_LOG_DIR:-/usr/local/var/log/unified}"
 WORK_DIR="${UNIFIED_WORK_DIR:-$DATA_DIR}"
+STDOUT_PATH="${UNIFIED_STDOUT_PATH:-$LOG_DIR/unified-seed-node.out.log}"
+STDERR_PATH="${UNIFIED_STDERR_PATH:-$LOG_DIR/unified-seed-node.err.log}"
 
 UNIFIED_MINE_VALUE="${UNIFIED_MINE:-true}"
 UNIFIED_NETWORK_NAME_VALUE="${UNIFIED_NETWORK_NAME:-unified-mainnet}"
@@ -39,32 +42,34 @@ DRY_RUN="${UNIFIED_DRY_RUN:-0}"
 
 BUILD_PACKAGE="${UNIFIED_BUILD_PACKAGE:-}"
 ENV_TEMPLATE=""
-UNIT_TEMPLATE=""
+PLIST_TEMPLATE=""
 NETWORK_TEMPLATE=""
 
 usage() {
 	cat <<'EOF'
-Install the UniFied seed node as a systemd service on Linux.
+Install the UniFied seed node as a launchd service on macOS.
 
 Usage:
-  sudo ./scripts/ops/install_seed_node.sh [--start] [--overwrite-env] [--dry-run]
+  sudo ./scripts/ops/install_seed_node_macos.sh [--start] [--overwrite-env] [--dry-run]
 
 Relevant environment variables:
-  UNIFIED_SERVICE_NAME
-  UNIFIED_SYSTEM_USER
-  UNIFIED_SYSTEM_GROUP
-  UNIFIED_INSTALL_PREFIX
-  UNIFIED_BINARY_PATH
   UNIFIED_SOURCE_ROOT
   UNIFIED_BUILD_PACKAGE
+  UNIFIED_LAUNCHD_LABEL
+  UNIFIED_INSTALL_PREFIX
+  UNIFIED_BINARY_PATH
   UNIFIED_CONFIG_DIR
   UNIFIED_ENV_FILE
   UNIFIED_NETWORK_CONFIG
   UNIFIED_NETWORK_CONFIG_SOURCE
-  UNIFIED_UNIT_PATH
+  UNIFIED_SUPPORT_DIR
+  UNIFIED_WRAPPER_PATH
+  UNIFIED_PLIST_PATH
   UNIFIED_DATA_DIR
   UNIFIED_LOG_DIR
   UNIFIED_WORK_DIR
+  UNIFIED_STDOUT_PATH
+  UNIFIED_STDERR_PATH
   UNIFIED_MINE
   UNIFIED_NETWORK_NAME
   UNIFIED_CHAIN_ID
@@ -80,7 +85,8 @@ Relevant environment variables:
   UNIFIED_CIRCULATING_SUPPLY
 
 Notes:
-  - RPC binds to 127.0.0.1 by default. Keep it private and tunnel or reverse-proxy it deliberately.
+  - This installer writes a LaunchDaemon, so run it as root.
+  - RPC binds to 127.0.0.1 by default. Keep it private unless you intentionally expose it.
   - Shared network settings are written to a JSON manifest referenced by the env file.
   - Set UNIFIED_NETWORK_CONFIG_SOURCE to copy one exact pinned manifest instead of rendering from env values.
   - Starting the service is blocked when placeholder values remain in either file.
@@ -88,7 +94,7 @@ EOF
 }
 
 log() {
-	echo "[install-seed-node] $*"
+	echo "[install-seed-node-macos] $*"
 }
 
 run_cmd() {
@@ -105,8 +111,8 @@ require_command() {
 	command -v "$1" >/dev/null 2>&1 || {
 		if [[ "$1" == "go" ]]; then
 			echo "Missing required dependency: go" >&2
-			echo "Install Go 1.25+ first. On Linux you can use:" >&2
-			echo "  sudo ./scripts/ops/install_go_linux.sh" >&2
+			echo "Install Go first, for example with Homebrew:" >&2
+			echo "  brew install go" >&2
 			exit 1
 		fi
 		echo "Missing required dependency: $1" >&2
@@ -133,24 +139,21 @@ configure_source_layout() {
 
 	if [[ -z "$BUILD_PACKAGE" ]]; then
 		echo "Could not find a node source package under ${ROOT_DIR}." >&2
-		echo "Expected one of:" >&2
-		echo "  ${ROOT_DIR}/cmd/unified-node" >&2
-		echo "  ${ROOT_DIR}/unified-protocol/cmd/unified-node" >&2
 		echo "Set UNIFIED_SOURCE_ROOT or UNIFIED_BUILD_PACKAGE if your checkout is elsewhere." >&2
 		exit 1
 	fi
 
 	for template_base in "${ROOT_DIR}/deploy" "${DEFAULT_ROOT_DIR}/deploy"; do
-		if [[ -f "${template_base}/env/unified-seed-node.env.tmpl" && -f "${template_base}/systemd/unified-seed-node.service.tmpl" && -f "${template_base}/network/unified-network.json.tmpl" ]]; then
+		if [[ -f "${template_base}/env/unified-seed-node.env.tmpl" && -f "${template_base}/launchd/io.unified.seed-node.plist.tmpl" && -f "${template_base}/network/unified-network.json.tmpl" ]]; then
 			ENV_TEMPLATE="${template_base}/env/unified-seed-node.env.tmpl"
-			UNIT_TEMPLATE="${template_base}/systemd/unified-seed-node.service.tmpl"
+			PLIST_TEMPLATE="${template_base}/launchd/io.unified.seed-node.plist.tmpl"
 			NETWORK_TEMPLATE="${template_base}/network/unified-network.json.tmpl"
 			break
 		fi
 	done
 
-	if [[ -z "$ENV_TEMPLATE" || -z "$UNIT_TEMPLATE" || -z "$NETWORK_TEMPLATE" ]]; then
-		echo "Missing installer templates under ${ROOT_DIR}/deploy or ${DEFAULT_ROOT_DIR}/deploy" >&2
+	if [[ -z "$ENV_TEMPLATE" || -z "$PLIST_TEMPLATE" || -z "$NETWORK_TEMPLATE" ]]; then
+		echo "Missing launchd installer templates under ${ROOT_DIR}/deploy or ${DEFAULT_ROOT_DIR}/deploy" >&2
 		exit 1
 	fi
 }
@@ -171,7 +174,6 @@ check_go_version() {
 	major="${version%%.*}"
 	minor="${version#*.}"
 	minor="${minor%%.*}"
-
 	if [[ -z "$major" || -z "$minor" ]]; then
 		return 1
 	fi
@@ -238,37 +240,12 @@ bootnodes_json() {
 	printf ']'
 }
 
-ensure_group() {
-	if getent group "$SYSTEM_GROUP" >/dev/null 2>&1; then
-		return 0
-	fi
-	run_cmd groupadd --system "$SYSTEM_GROUP"
-}
-
-ensure_user() {
-	if id -u "$SYSTEM_USER" >/dev/null 2>&1; then
-		return 0
-	fi
-
-	local shell_path
-	shell_path="$(command -v nologin || true)"
-	if [[ -z "$shell_path" ]]; then
-		shell_path="/bin/false"
-	fi
-
-	run_cmd useradd \
-		--system \
-		--home-dir "$DATA_DIR" \
-		--shell "$shell_path" \
-		--gid "$SYSTEM_GROUP" \
-		"$SYSTEM_USER"
-}
-
 ensure_directories() {
-	run_cmd install -d -m 0750 -o "$SYSTEM_USER" -g "$SYSTEM_GROUP" "$DATA_DIR"
-	run_cmd install -d -m 0750 -o "$SYSTEM_USER" -g "$SYSTEM_GROUP" "$WORK_DIR"
-	run_cmd install -d -m 0750 -o "$SYSTEM_USER" -g "$SYSTEM_GROUP" "$LOG_DIR"
-	run_cmd install -d -m 0755 -o root -g root "$CONFIG_DIR"
+	run_cmd install -d -m 0755 "$CONFIG_DIR"
+	run_cmd install -d -m 0755 "$SUPPORT_DIR"
+	run_cmd install -d -m 0755 "$DATA_DIR"
+	run_cmd install -d -m 0755 "$WORK_DIR"
+	run_cmd install -d -m 0755 "$LOG_DIR"
 }
 
 build_binary() {
@@ -307,8 +284,7 @@ write_network_config_file() {
 			echo "[dry-run] copy $NETWORK_CONFIG_SOURCE -> $NETWORK_CONFIG_PATH"
 		else
 			cp "$NETWORK_CONFIG_SOURCE" "$NETWORK_CONFIG_PATH"
-			chown root:"$SYSTEM_GROUP" "$NETWORK_CONFIG_PATH"
-			chmod 0640 "$NETWORK_CONFIG_PATH"
+			chmod 0644 "$NETWORK_CONFIG_PATH"
 		fi
 		return 0
 	fi
@@ -324,8 +300,7 @@ write_network_config_file() {
 		CIRCULATING_SUPPLY "$UNIFIED_CIRCULATING_SUPPLY_VALUE" \
 		BOOTNODES_JSON "$bootnodes_json_value"
 	if [[ "$DRY_RUN" != "1" ]]; then
-		chown root:"$SYSTEM_GROUP" "$NETWORK_CONFIG_PATH"
-		chmod 0640 "$NETWORK_CONFIG_PATH"
+		chmod 0644 "$NETWORK_CONFIG_PATH"
 	fi
 }
 
@@ -348,25 +323,57 @@ write_env_file() {
 		OPERATOR_ALIAS "$UNIFIED_OPERATOR_ALIAS_VALUE" \
 		OPERATOR_VOTING_POWER "$UNIFIED_OPERATOR_VOTING_POWER_VALUE"
 	if [[ "$DRY_RUN" != "1" ]]; then
-		chown root:"$SYSTEM_GROUP" "$ENV_FILE"
-		chmod 0640 "$ENV_FILE"
+		chmod 0644 "$ENV_FILE"
 	fi
 }
 
-write_unit_file() {
+write_wrapper() {
+	run_cmd install -d -m 0755 "$(dirname "$WRAPPER_PATH")"
+	if [[ "$DRY_RUN" == "1" ]]; then
+		echo "[dry-run] write $WRAPPER_PATH"
+		return 0
+	fi
+
+	cat >"$WRAPPER_PATH" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$ENV_FILE"
+
+args=(
+  --network-config "\${UNIFIED_NETWORK_CONFIG}"
+  --datadir "\${UNIFIED_DATADIR}"
+  --rpchost "\${UNIFIED_RPC_HOST}"
+  --rpcport "\${UNIFIED_RPC_PORT}"
+  --p2p-listen "\${UNIFIED_P2P_LISTEN}"
+  --operator "\${UNIFIED_OPERATOR_ADDRESS}"
+  --operator-alias "\${UNIFIED_OPERATOR_ALIAS}"
+  --operator-voting-power "\${UNIFIED_OPERATOR_VOTING_POWER}"
+)
+
+case "\${UNIFIED_MINE:-false}" in
+  1|true|TRUE|yes|YES|on|ON)
+    args=(--mine "\${args[@]}")
+    ;;
+esac
+
+exec "$BINARY_PATH" "\${args[@]}"
+EOF
+	chmod 0755 "$WRAPPER_PATH"
+}
+
+write_plist() {
 	render_template \
-		"$UNIT_TEMPLATE" \
-		"$UNIT_PATH" \
-		SYSTEM_USER "$SYSTEM_USER" \
-		SYSTEM_GROUP "$SYSTEM_GROUP" \
+		"$PLIST_TEMPLATE" \
+		"$PLIST_PATH" \
+		LABEL "$LABEL" \
+		WRAPPER_PATH "$WRAPPER_PATH" \
 		WORK_DIR "$WORK_DIR" \
-		ENV_FILE "$ENV_FILE" \
-		BINARY_PATH "$BINARY_PATH" \
-		DATA_DIR "$DATA_DIR" \
-		LOG_DIR "$LOG_DIR"
+		STDOUT_PATH "$STDOUT_PATH" \
+		STDERR_PATH "$STDERR_PATH"
 	if [[ "$DRY_RUN" != "1" ]]; then
-		chown root:root "$UNIT_PATH"
-		chmod 0644 "$UNIT_PATH"
+		chmod 0644 "$PLIST_PATH"
+		plutil -lint "$PLIST_PATH" >/dev/null
 	fi
 }
 
@@ -380,20 +387,28 @@ validate_startup_inputs() {
 		exit 1
 	fi
 	if grep -q 'REPLACE_ME' "$ENV_FILE" || grep -q 'REPLACE_ME' "$NETWORK_CONFIG_PATH"; then
-		echo "Refusing to start $SERVICE_NAME with placeholder main-network values in $ENV_FILE or $NETWORK_CONFIG_PATH" >&2
+		echo "Refusing to start $LABEL with placeholder main-network values in $ENV_FILE or $NETWORK_CONFIG_PATH" >&2
 		exit 1
 	fi
 }
 
-reload_and_enable() {
-	run_cmd systemctl daemon-reload
-	run_cmd systemctl enable "$SERVICE_NAME"
+reload_service() {
+	if [[ "$DRY_RUN" == "1" ]]; then
+		run_cmd launchctl bootout system "$PLIST_PATH"
+		run_cmd launchctl bootstrap system "$PLIST_PATH"
+		run_cmd launchctl enable "system/$LABEL"
+		return 0
+	fi
+	launchctl bootout system "$PLIST_PATH" >/dev/null 2>&1 || true
+	launchctl bootstrap system "$PLIST_PATH"
+	launchctl enable "system/$LABEL"
 }
 
 start_service() {
 	validate_startup_inputs
-	run_cmd systemctl restart "$SERVICE_NAME"
-	run_cmd systemctl --no-pager --full status "$SERVICE_NAME"
+	reload_service
+	run_cmd launchctl kickstart -k "system/$LABEL"
+	run_cmd launchctl print "system/$LABEL"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -422,8 +437,8 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if [[ "$(uname -s)" != "Linux" ]]; then
-	echo "This installer only supports Linux/systemd hosts." >&2
+if [[ "$(uname -s)" != "Darwin" ]]; then
+	echo "This installer only supports macOS." >&2
 	exit 1
 fi
 
@@ -433,15 +448,12 @@ if [[ "$DRY_RUN" != "1" && "${EUID}" -ne 0 ]]; then
 fi
 
 require_command go
-require_command systemctl
+require_command launchctl
 require_command install
 require_command sed
 require_command cp
 require_command awk
-require_command useradd
-require_command groupadd
-require_command getent
-require_command id
+require_command plutil
 
 if ! check_go_version; then
 	echo "Go 1.25+ is required. Found $(parse_go_version)." >&2
@@ -452,21 +464,19 @@ configure_source_layout
 
 log "building unified-node from $ROOT_DIR using $BUILD_PACKAGE"
 build_binary
-log "ensuring system user and directories"
-ensure_group
-ensure_user
+log "ensuring directories"
 ensure_directories
 log "writing $NETWORK_CONFIG_PATH"
 write_network_config_file
 log "writing $ENV_FILE"
 write_env_file
-log "writing $UNIT_PATH"
-write_unit_file
-log "reloading systemd"
-reload_and_enable
+log "writing $WRAPPER_PATH"
+write_wrapper
+log "writing $PLIST_PATH"
+write_plist
 
 if [[ "$START_SERVICE" == "1" ]]; then
-	log "starting $SERVICE_NAME"
+	log "starting $LABEL"
 	start_service
 else
 	log "installation complete"
@@ -475,21 +485,24 @@ fi
 cat <<EOF
 
 Seed node install summary:
-  Service:      $SERVICE_NAME
+  Label:        $LABEL
   Binary:       $BINARY_PATH
   Network cfg:  $NETWORK_CONFIG_PATH
   Env file:     $ENV_FILE
-  Unit file:    $UNIT_PATH
+  Wrapper:      $WRAPPER_PATH
+  Plist:        $PLIST_PATH
   Data dir:     $DATA_DIR
   Log dir:      $LOG_DIR
 
 Next steps:
   1. Edit $NETWORK_CONFIG_PATH and $ENV_FILE if any REPLACE_ME values remain.
-  2. Review bootnodes and operator address before joining a shared network.
-  3. Start the service with:
-       sudo systemctl restart $SERVICE_NAME
-  4. Inspect logs with:
-       sudo journalctl -u $SERVICE_NAME -f
+  2. Start the service with:
+       sudo launchctl bootstrap system $PLIST_PATH
+       sudo launchctl kickstart -k system/$LABEL
+  3. Inspect status:
+       sudo launchctl print system/$LABEL
+  4. Inspect logs:
+       tail -f "$STDOUT_PATH" "$STDERR_PATH"
 
 RPC remains bound to $UNIFIED_RPC_HOST_VALUE:$UNIFIED_RPC_PORT_VALUE by default.
 Keep RPC private unless you deliberately front it with access controls.

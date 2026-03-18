@@ -21,15 +21,16 @@ import (
 )
 
 const (
-	BlocksTopic              = "ufi-blocks"
-	ChainSyncProtocol        = protocol.ID("/ufi/chain-sync/1.0.0")
-	MaxGossipBlockBytes      = 4 << 20
-	MaxChainSyncBatchSize    = 64
-	MaxChainSyncRequestBytes = 4 << 10
-	DefaultPeerBlockLimit    = 48
-	DefaultPeerSyncLimit     = 24
-	DefaultPeerLimitWindow   = time.Minute
-	DefaultP2PStreamTimeout  = 10 * time.Second
+	BlocksTopic               = "ufi-blocks"
+	ChainSyncProtocol         = protocol.ID("/ufi/chain-sync/1.0.0")
+	MaxGossipBlockBytes       = 4 << 20
+	MaxChainSyncBatchSize     = 64
+	MaxChainSyncRequestBytes  = 4 << 10
+	MaxChainSyncResponseBytes = 6 << 20
+	DefaultPeerBlockLimit     = 48
+	DefaultPeerSyncLimit      = 24
+	DefaultPeerLimitWindow    = time.Minute
+	DefaultP2PStreamTimeout   = 10 * time.Second
 )
 
 type ChainSyncProvider interface {
@@ -52,6 +53,7 @@ type P2PNode struct {
 	onBlock       func(Block) error
 	blockLimiter  *peerWindowLimiter
 	syncLimiter   *peerWindowLimiter
+	reputation    *PeerReputationBook
 }
 
 type chainSyncRequest struct {
@@ -104,6 +106,7 @@ func NewP2PNode(ctx context.Context, config P2PConfig, logger *log.Logger, chain
 		onBlock:       onBlock,
 		blockLimiter:  newPeerWindowLimiter(DefaultPeerBlockLimit, DefaultPeerLimitWindow),
 		syncLimiter:   newPeerWindowLimiter(DefaultPeerSyncLimit, DefaultPeerLimitWindow),
+		reputation:    NewPeerReputationBook(),
 	}
 	host.SetStreamHandler(ChainSyncProtocol, node.handleChainSync)
 
@@ -128,25 +131,49 @@ func (p *P2PNode) Start(ctx context.Context) {
 			if message.ReceivedFrom == p.host.ID() {
 				continue
 			}
+			now := time.Now()
+			if p.reputation != nil && !p.reputation.Allowed(message.ReceivedFrom, now) {
+				p.logger.Printf("dropping block gossip from banned peer %s", message.ReceivedFrom)
+				p.disconnectPeer(message.ReceivedFrom)
+				continue
+			}
 			if len(message.Data) > MaxGossipBlockBytes {
+				p.penalizePeer(message.ReceivedFrom, 20, "oversized block gossip")
 				p.logger.Printf("discarding oversized block gossip from %s", message.ReceivedFrom)
 				continue
 			}
-			if p.blockLimiter != nil && !p.blockLimiter.Allow(message.ReceivedFrom, time.Now()) {
+			blockLimit := DefaultPeerBlockLimit
+			if p.reputation != nil {
+				blockLimit = p.reputation.AdaptiveLimit(message.ReceivedFrom, DefaultPeerBlockLimit)
+			}
+			if blockLimit == 0 {
+				p.disconnectPeer(message.ReceivedFrom)
+				continue
+			}
+			if p.blockLimiter != nil && !p.blockLimiter.AllowWithLimit(message.ReceivedFrom, now, blockLimit) {
+				p.penalizePeer(message.ReceivedFrom, 4, "block gossip rate limit exceeded")
 				p.logger.Printf("rate limiting block gossip from %s", message.ReceivedFrom)
 				continue
 			}
 
 			var block Block
 			if err := json.Unmarshal(message.Data, &block); err != nil {
+				p.penalizePeer(message.ReceivedFrom, 25, "invalid block gossip payload")
 				p.logger.Printf("discarding invalid block payload: %v", err)
 				continue
 			}
 			if p.onBlock != nil {
 				if err := p.onBlock(block); err != nil {
+					penalty := 10
+					if !errors.Is(err, ErrForkNotPreferred) {
+						penalty = 30
+					}
+					p.penalizePeer(message.ReceivedFrom, penalty, err.Error())
 					p.logger.Printf("block import failed: %v", err)
+					continue
 				}
 			}
+			p.rewardPeer(message.ReceivedFrom, 2, "accepted block gossip")
 		}
 	}()
 }
@@ -169,7 +196,18 @@ func (p *P2PNode) SyncChain(ctx context.Context, localHeight uint64, importBlock
 
 	peers := append([]peer.ID(nil), p.host.Network().Peers()...)
 	sort.Slice(peers, func(i, j int) bool {
-		return peers[i].String() < peers[j].String()
+		left := peers[i]
+		right := peers[j]
+		leftScore := DefaultPeerScore
+		rightScore := DefaultPeerScore
+		if p.reputation != nil {
+			leftScore = p.reputation.Score(left)
+			rightScore = p.reputation.Score(right)
+		}
+		if leftScore == rightScore {
+			return left.String() < right.String()
+		}
+		return leftScore > rightScore
 	})
 	if len(peers) == 0 {
 		return nil
@@ -178,7 +216,7 @@ func (p *P2PNode) SyncChain(ctx context.Context, localHeight uint64, importBlock
 	var lastErr error
 	height := localHeight
 	for _, peerID := range peers {
-		if err := p.syncFromPeer(ctx, peerID, &height, importBlock); err != nil {
+		if _, err := p.syncFromPeer(ctx, peerID, &height, importBlock); err != nil {
 			lastErr = err
 			p.logger.Printf("chain sync from peer %s failed: %v", peerID, err)
 			continue
@@ -231,32 +269,44 @@ func (p *P2PNode) connectBootnode(ctx context.Context, address string) error {
 	return p.host.Connect(ctx, *info)
 }
 
-func (p *P2PNode) syncFromPeer(ctx context.Context, peerID peer.ID, localHeight *uint64, importBlock func(Block) error) error {
+func (p *P2PNode) syncFromPeer(ctx context.Context, peerID peer.ID, localHeight *uint64, importBlock func(Block) error) (int, error) {
+	if p.reputation != nil && !p.reputation.Allowed(peerID, time.Now()) {
+		return 0, errors.New("peer temporarily banned")
+	}
+
 	next := *localHeight + 1
+	imported := 0
 	for {
 		response, err := p.requestBlocks(ctx, peerID, next, DefaultSyncBatchSize)
 		if err != nil {
-			return err
+			p.penalizePeer(peerID, 8, err.Error())
+			return imported, err
 		}
 		if response.Error != "" {
-			return errors.New(response.Error)
+			p.penalizePeer(peerID, 6, response.Error)
+			return imported, errors.New(response.Error)
 		}
 		if response.LatestNumber < next || len(response.Blocks) == 0 {
-			return nil
+			p.rewardPeer(peerID, 1, "chain sync completed")
+			return imported, nil
+		}
+		if err := validateSyncResponse(next, response); err != nil {
+			p.penalizePeer(peerID, 20, err.Error())
+			return imported, err
 		}
 
 		for _, block := range response.Blocks {
-			if block.Header.Number < next {
-				continue
-			}
 			if err := importBlock(block); err != nil {
-				return err
+				p.penalizePeer(peerID, 12, err.Error())
+				return imported, err
 			}
 			*localHeight = block.Header.Number
 			next = block.Header.Number + 1
+			imported++
 		}
 		if next > response.LatestNumber {
-			return nil
+			p.rewardPeer(peerID, minInt(4, imported), "chain sync imported blocks")
+			return imported, nil
 		}
 	}
 }
@@ -285,7 +335,7 @@ func (p *P2PNode) requestBlocks(ctx context.Context, peerID peer.ID, startNumber
 	}
 
 	var response chainSyncResponse
-	if err := json.NewDecoder(stream).Decode(&response); err != nil {
+	if err := json.NewDecoder(io.LimitReader(stream, MaxChainSyncResponseBytes)).Decode(&response); err != nil {
 		return chainSyncResponse{}, err
 	}
 	return response, nil
@@ -299,21 +349,42 @@ func (p *P2PNode) handleChainSync(stream network.Stream) {
 	}
 	_ = stream.SetDeadline(time.Now().Add(DefaultP2PStreamTimeout))
 	remotePeer := stream.Conn().RemotePeer()
-	if p.syncLimiter != nil && !p.syncLimiter.Allow(remotePeer, time.Now()) {
+	now := time.Now()
+	if p.reputation != nil && !p.reputation.Allowed(remotePeer, now) {
+		_ = json.NewEncoder(stream).Encode(chainSyncResponse{Error: "peer temporarily banned"})
+		p.disconnectPeer(remotePeer)
+		return
+	}
+	syncLimit := DefaultPeerSyncLimit
+	if p.reputation != nil {
+		syncLimit = p.reputation.AdaptiveLimit(remotePeer, DefaultPeerSyncLimit)
+	}
+	if syncLimit == 0 {
+		_ = json.NewEncoder(stream).Encode(chainSyncResponse{Error: "peer temporarily banned"})
+		p.disconnectPeer(remotePeer)
+		return
+	}
+	if p.syncLimiter != nil && !p.syncLimiter.AllowWithLimit(remotePeer, now, syncLimit) {
+		p.penalizePeer(remotePeer, 4, "chain sync rate limit exceeded")
 		_ = json.NewEncoder(stream).Encode(chainSyncResponse{Error: "rate limited"})
 		return
 	}
 
 	var request chainSyncRequest
 	if err := json.NewDecoder(io.LimitReader(stream, MaxChainSyncRequestBytes)).Decode(&request); err != nil {
+		p.penalizePeer(remotePeer, 10, "invalid chain sync request")
 		_ = json.NewEncoder(stream).Encode(chainSyncResponse{Error: err.Error()})
 		return
 	}
 	if request.Limit <= 0 {
 		request.Limit = DefaultSyncBatchSize
 	}
-	if request.Limit > MaxChainSyncBatchSize {
-		request.Limit = MaxChainSyncBatchSize
+	maxLimit := MaxChainSyncBatchSize
+	if syncLimit < maxLimit {
+		maxLimit = syncLimit
+	}
+	if request.Limit > maxLimit {
+		request.Limit = maxLimit
 	}
 
 	latest := p.chainProvider.LatestBlock()
@@ -329,10 +400,14 @@ func (p *P2PNode) handleChainSync(stream network.Stream) {
 	for number := request.StartNumber; number <= latest.Header.Number && len(response.Blocks) < request.Limit; number++ {
 		block, err := p.chainProvider.GetBlockByNumber(number)
 		if err != nil {
+			p.penalizePeer(remotePeer, 6, err.Error())
 			response.Error = err.Error()
 			break
 		}
 		response.Blocks = append(response.Blocks, block)
+	}
+	if response.Error == "" {
+		p.rewardPeer(remotePeer, 1, "served chain sync request")
 	}
 	_ = json.NewEncoder(stream).Encode(response)
 }
@@ -365,11 +440,22 @@ func newPeerWindowLimiter(limit int, window time.Duration) *peerWindowLimiter {
 }
 
 func (l *peerWindowLimiter) Allow(id peer.ID, now time.Time) bool {
-	if l == nil || l.limit <= 0 || l.window <= 0 {
+	return l.AllowWithLimit(id, now, 0)
+}
+
+func (l *peerWindowLimiter) AllowWithLimit(id peer.ID, now time.Time, limit int) bool {
+	if l == nil || l.window <= 0 {
 		return true
 	}
 	if id == "" {
 		return false
+	}
+	effectiveLimit := l.limit
+	if limit > 0 && (effectiveLimit <= 0 || limit < effectiveLimit) {
+		effectiveLimit = limit
+	}
+	if effectiveLimit <= 0 {
+		return true
 	}
 
 	l.mu.Lock()
@@ -381,7 +467,7 @@ func (l *peerWindowLimiter) Allow(id peer.ID, now time.Time) bool {
 		l.pruneLocked(now)
 		return true
 	}
-	if entry.count >= l.limit {
+	if entry.count >= effectiveLimit {
 		return false
 	}
 	entry.count++
@@ -395,4 +481,75 @@ func (l *peerWindowLimiter) pruneLocked(now time.Time) {
 			delete(l.entries, id)
 		}
 	}
+}
+
+func (p *P2PNode) disconnectPeer(id peer.ID) {
+	if p == nil || p.host == nil || id == "" {
+		return
+	}
+	_ = p.host.Network().ClosePeer(id)
+}
+
+func (p *P2PNode) penalizePeer(id peer.ID, delta int, reason string) {
+	if p == nil || p.reputation == nil || id == "" {
+		return
+	}
+	status := p.reputation.Penalize(id, delta, reason)
+	if status.Banned {
+		p.logger.Printf("banning peer %s until %s: %s", id, status.BannedUntil.UTC().Format(time.RFC3339), reason)
+		p.disconnectPeer(id)
+	}
+}
+
+func (p *P2PNode) rewardPeer(id peer.ID, delta int, reason string) {
+	if p == nil || p.reputation == nil || id == "" {
+		return
+	}
+	_ = p.reputation.Reward(id, delta, reason)
+}
+
+func (p *P2PNode) PeerStatuses() []PeerReputationStatus {
+	if p == nil || p.reputation == nil {
+		return nil
+	}
+	return p.reputation.Snapshot(p.connectedPeerSet())
+}
+
+func (p *P2PNode) PeerSummary() PeerReputationSummary {
+	if p == nil || p.reputation == nil {
+		return PeerReputationSummary{}
+	}
+	return p.reputation.Summary(p.connectedPeerSet())
+}
+
+func (p *P2PNode) connectedPeerSet() map[peer.ID]bool {
+	connected := make(map[peer.ID]bool)
+	if p == nil || p.host == nil {
+		return connected
+	}
+	for _, id := range p.host.Network().Peers() {
+		connected[id] = true
+	}
+	return connected
+}
+
+func validateSyncResponse(expectedStart uint64, response chainSyncResponse) error {
+	if len(response.Blocks) > MaxChainSyncBatchSize {
+		return errors.New("chain sync response exceeded batch limit")
+	}
+	next := expectedStart
+	for _, block := range response.Blocks {
+		if block.Header.Number != next {
+			return errors.New("chain sync response block numbers are not contiguous")
+		}
+		next++
+	}
+	return nil
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
