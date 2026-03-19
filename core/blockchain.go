@@ -56,6 +56,7 @@ const (
 
 var (
 	ErrBlockNotFound         = errors.New("core: block not found")
+	ErrCrawlProofNotFound    = errors.New("core: crawl proof not found")
 	ErrInsufficientBalance   = errors.New("core: insufficient balance")
 	ErrInvalidBlock          = errors.New("core: invalid block")
 	ErrInvalidSignature      = errors.New("core: invalid transaction signature")
@@ -64,6 +65,7 @@ var (
 	ErrInvalidNonce          = errors.New("core: invalid nonce")
 	ErrTaskNotFound          = errors.New("core: task not found")
 	ErrTaskSettled           = errors.New("core: task already settled")
+	ErrTransactionNotFound   = errors.New("core: transaction not found")
 )
 
 type TxType string
@@ -175,6 +177,33 @@ type Block struct {
 	Hash   string      `json:"hash"`
 	Header BlockHeader `json:"header"`
 	Body   BlockBody   `json:"body"`
+}
+
+type ActivityTransaction struct {
+	BlockNumber uint64      `json:"blockNumber"`
+	BlockHash   string      `json:"blockHash"`
+	Transaction Transaction `json:"transaction"`
+}
+
+type ActivityProof struct {
+	BlockNumber uint64     `json:"blockNumber"`
+	BlockHash   string     `json:"blockHash"`
+	Proof       CrawlProof `json:"proof"`
+}
+
+type RecentActivity struct {
+	LatestBlock  uint64                `json:"latestBlock"`
+	Transactions []ActivityTransaction `json:"transactions,omitempty"`
+	Proofs       []ActivityProof       `json:"proofs,omitempty"`
+}
+
+type AddressActivity struct {
+	Address      string                `json:"address"`
+	Alias        string                `json:"alias,omitempty"`
+	Balance      string                `json:"balance"`
+	LatestNonce  uint64                `json:"latestNonce"`
+	Transactions []ActivityTransaction `json:"transactions,omitempty"`
+	Proofs       []ActivityProof       `json:"proofs,omitempty"`
 }
 
 type BlockchainConfig struct {
@@ -630,12 +659,179 @@ func (bc *Blockchain) GetBlockByHash(hash string) (Block, error) {
 	return block, err
 }
 
+func (bc *Blockchain) RecentActivity(limit uint64) RecentActivity {
+	maxItems := normalizeActivityLimit(limit)
+	latest := bc.LatestBlock().Header.Number
+	result := RecentActivity{LatestBlock: latest}
+
+	for number := latest; ; number-- {
+		block, err := bc.GetBlockByNumber(number)
+		if err == nil {
+			for idx := len(block.Body.Transactions) - 1; idx >= 0 && len(result.Transactions) < maxItems; idx-- {
+				result.Transactions = append(result.Transactions, ActivityTransaction{
+					BlockNumber: block.Header.Number,
+					BlockHash:   block.Hash,
+					Transaction: block.Body.Transactions[idx],
+				})
+			}
+			for idx := len(block.Body.CrawlProofs) - 1; idx >= 0 && len(result.Proofs) < maxItems; idx-- {
+				result.Proofs = append(result.Proofs, ActivityProof{
+					BlockNumber: block.Header.Number,
+					BlockHash:   block.Hash,
+					Proof:       block.Body.CrawlProofs[idx],
+				})
+			}
+		}
+		if len(result.Transactions) >= maxItems && len(result.Proofs) >= maxItems {
+			break
+		}
+		if number == 0 {
+			break
+		}
+	}
+
+	return result
+}
+
+func (bc *Blockchain) AddressActivity(address string, limit uint64) (AddressActivity, error) {
+	cleaned := strings.TrimSpace(address)
+	if cleaned == "" {
+		return AddressActivity{}, ErrInvalidTransaction
+	}
+
+	maxItems := normalizeActivityLimit(limit)
+	result := AddressActivity{
+		Address:     cleaned,
+		Balance:     bc.GetBalance(cleaned).String(),
+		LatestNonce: bc.PendingNonce(cleaned),
+	}
+	if record, ok := bc.ReverseResolve(cleaned); ok {
+		result.Alias = record.Name
+	}
+
+	latest := bc.LatestBlock().Header.Number
+	relatedTaskHashes := make(map[string]struct{})
+	for number := latest; ; number-- {
+		block, err := bc.GetBlockByNumber(number)
+		if err == nil {
+			for idx := len(block.Body.Transactions) - 1; idx >= 0 && len(result.Transactions) < maxItems; idx-- {
+				tx := block.Body.Transactions[idx]
+				if tx.From != cleaned && tx.To != cleaned {
+					continue
+				}
+				result.Transactions = append(result.Transactions, ActivityTransaction{
+					BlockNumber: block.Header.Number,
+					BlockHash:   block.Hash,
+					Transaction: tx,
+				})
+				if tx.Type == TxTypeSearchTask {
+					relatedTaskHashes[tx.Hash] = struct{}{}
+				}
+			}
+		}
+		if len(result.Transactions) >= maxItems || number == 0 {
+			break
+		}
+	}
+
+	for number := latest; ; number-- {
+		block, err := bc.GetBlockByNumber(number)
+		if err == nil {
+			for idx := len(block.Body.CrawlProofs) - 1; idx >= 0 && len(result.Proofs) < maxItems; idx-- {
+				proof := block.Body.CrawlProofs[idx]
+				_, relatedTask := relatedTaskHashes[proof.TaskTxHash]
+				if proof.Miner != cleaned && !relatedTask {
+					continue
+				}
+				result.Proofs = append(result.Proofs, ActivityProof{
+					BlockNumber: block.Header.Number,
+					BlockHash:   block.Hash,
+					Proof:       proof,
+				})
+			}
+		}
+		if len(result.Proofs) >= maxItems || number == 0 {
+			break
+		}
+	}
+
+	return result, nil
+}
+
+func (bc *Blockchain) TransactionByHash(hash string) (ActivityTransaction, error) {
+	target := strings.TrimSpace(hash)
+	if target == "" {
+		return ActivityTransaction{}, ErrTransactionNotFound
+	}
+
+	latest := bc.LatestBlock().Header.Number
+	for number := latest; ; number-- {
+		block, err := bc.GetBlockByNumber(number)
+		if err == nil {
+			for _, tx := range block.Body.Transactions {
+				if tx.Hash == target {
+					return ActivityTransaction{
+						BlockNumber: block.Header.Number,
+						BlockHash:   block.Hash,
+						Transaction: tx,
+					}, nil
+				}
+			}
+		}
+		if number == 0 {
+			break
+		}
+	}
+
+	return ActivityTransaction{}, ErrTransactionNotFound
+}
+
+func (bc *Blockchain) CrawlProofByTask(taskTxHash, taskID string) (ActivityProof, error) {
+	targetTx := strings.TrimSpace(taskTxHash)
+	targetTask := strings.TrimSpace(taskID)
+	if targetTx == "" && targetTask == "" {
+		return ActivityProof{}, ErrCrawlProofNotFound
+	}
+
+	latest := bc.LatestBlock().Header.Number
+	for number := latest; ; number-- {
+		block, err := bc.GetBlockByNumber(number)
+		if err == nil {
+			for _, proof := range block.Body.CrawlProofs {
+				if (targetTx != "" && proof.TaskTxHash == targetTx) || (targetTask != "" && proof.TaskID == targetTask) {
+					return ActivityProof{
+						BlockNumber: block.Header.Number,
+						BlockHash:   block.Hash,
+						Proof:       proof,
+					}, nil
+				}
+			}
+		}
+		if number == 0 {
+			break
+		}
+	}
+
+	return ActivityProof{}, ErrCrawlProofNotFound
+}
+
 func (bc *Blockchain) HasBlockHash(hash string) bool {
 	if strings.TrimSpace(hash) == "" {
 		return false
 	}
 	_, err := bc.GetBlockByHash(hash)
 	return err == nil
+}
+
+func normalizeActivityLimit(limit uint64) int {
+	switch {
+	case limit == 0:
+		return 12
+	case limit > 64:
+		return 64
+	default:
+		return int(limit)
+	}
 }
 
 func (bc *Blockchain) ParentState(block Block) (*StateSnapshot, error) {

@@ -201,6 +201,7 @@ Installed paths by default:
 Operational notes:
 
 - Keep `UNIFIED_RPC_HOST=127.0.0.1` unless you intentionally expose RPC behind access controls.
+- If a browser app must call the node directly, set `UNIFIED_RPC_CORS_ORIGINS` to a specific origin or `*`, and review firewall/rate-limit exposure before binding RPC publicly.
 - Replace placeholder `REPLACE_ME` values in both the env file and the shared network config before starting.
 - All shared-network nodes still need the exact same chain ID, genesis address, architect address, and circulating supply.
 - If you need different paths or service names, override the documented `UNIFIED_*` installer variables.

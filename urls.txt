@@ -1,20 +1,120 @@
-https://arxiv.org/list/cs/new,artificial intelligence research
-https://github.com/trending,trending open source code
-https://w3.org,web standards and protocols
-https://ietf.org,internet engineering task force
+# --- ACADEMIC & RESEARCH (.EDU / .ORG) ---
+https://arxiv.org,open access research papers
 https://mit.edu,massachusetts institute of technology
 https://stanford.edu,stanford university research
-https://nasa.gov/science,space and aeronautics data
-https://pubmed.ncbi.nlm.nih.gov,medical and life sciences
-https://nature.com,global scientific reports
-https://worldbank.org/data,global economic indicators
-https://sec.gov/edgar,corporate financial filings
-https://whitehouse.gov,us government transparency
-https://europa.eu,european union official data
-https://gutenberg.org,public domain literature
-https://wikipedia.org,human knowledge base
+https://harvard.edu,harvard university academic archives
+https://berkeley.edu,uc berkeley technical reports
+https://ox.ac.uk,university of oxford research
+https://cam.ac.uk,university of cambridge science
+https://ethz.ch,eth zurich technical archives
+https://nature.com,scientific journals and reports
+https://science.org,aaas science research
+https://ieeexplore.ieee.org,electrical engineering and tech
+https://dl.acm.org,computing machinery digital library
+https://jstor.org,humanities and social sciences
+https://ncbi.nlm.nih.gov,biotechnology and medical data
+https://nasa.gov,space science and aeronautics
+https://cern.ch,particle physics research
+https://maxplanck.de,fundamental research society
+https://who.int,global health data
+https://un.org,international policy and data
+https://worldbank.org,global economic indicators
+
+# --- OPEN SOURCE & DEVELOPER INFRASTRUCTURE ---
+https://github.com/trending,trending open source code
+https://gitlab.com,devops and software lifecycle
+https://bitbucket.org,git repository hosting
+https://docker.com,containerization technology
+https://kubernetes.io,cloud native orchestration
+https://linuxfoundation.org,open source collaboration
+https://apache.org,software foundation projects
+https://mozilla.org,web browser and privacy tech
+https://w3.org,world wide web standards
+https://ietf.org,internet engineering task force
+https://rust-lang.org,systems programming research
+https://go.dev,golang documentation and news
+python.org,python software foundation
+https://typescriptlang.org,typed javascript research
+https://stackexchange.com,technical knowledge base
+https://stackoverflow.com,developer problem solving
+https://hashicorp.com,infrastructure as code
+https://digitalocean.com/community,cloud infrastructure guides
+https://aws.amazon.com/blogs,cloud computing trends
+https://cloud.google.com/blog,enterprise cloud data
+
+# --- TECHNOLOGY & FUTURE TECH ---
 https://news.ycombinator.com,hacker news technology trends
 https://techcrunch.com,venture capital and startups
-https://wired.com,digital culture and future tech
+https://wired.com,digital culture and tech
+https://theverge.com,consumer electronics and tech
+https://arstechnica.com,deep technical analysis
+https://venturebeat.com,artificial intelligence and tech
+https://technologyreview.com,mit tech review
+https://engadget.com,gadgets and future tech
+https://gizmodo.com,design and technology
+https://zdnet.com,enterprise technology news
+
+# --- CRYPTO & WEB3 CORE ---
+https://ethereum.org,decentralized finance research
+https://bitcoin.org,p2p electronic cash
+https://solana.com,high performance blockchain
+https://chain.link,decentralized oracle networks
+https://ipfs.tech,interplanetary file system
+https://filecoin.io,decentralized storage network
+https://vitalik.eth.limo,vitalik buterin technical blog
+https://messari.io,crypto asset research
+https://coindesk.com,blockchain news and data
+https://cointelegraph.com,digital asset trends
+https://theblock.co,crypto industry research
+https://uniswap.org,decentralized exchange protocol
+https://aave.com,liquidity market protocols
+https://makerdao.com,decentralized credit
+https://polkadot.network,multi chain interoperability
+
+# --- GLOBAL NEWS & INTEGRITY ---
 https://reuters.com,global news integrity
 https://bloomberg.com,financial market data
+https://apnews.com,associated press news
+https://nytimes.com,global journalism
+https://wsj.com,business and finance
+https://ft.com,financial times international
+https://economist.com,global politics and economics
+https://theguardian.com,independent news
+https://aljazeera.com,middle east and global news
+https://bbc.com,british broadcasting corporation
+
+# --- DATA ARCHIVES & LIBRARIES ---
+https://archive.org,internet archive wayback machine
+https://gutenberg.org,public domain literature
+https://wikipedia.org,human knowledge base
+https://wikisource.org,source documents and texts
+https://commons.wikimedia.org,open media repository
+https://data.gov,us government open data
+https://data.europa.eu,european open data portal
+https://statista.com,global statistics and data
+https://wolframalpha.com,computational intelligence
+https://britannica.com,encyclopedic knowledge
+
+# --- OPERATING SYSTEMS & KERNELS ---
+https://kernel.org,linux kernel archives
+https://debian.org,universal operating system
+https://ubuntu.com,linux for human beings
+https://archlinux.org,lightweight linux distro
+https://freebsd.org,advanced bsd operating system
+https://redhat.com,enterprise open source
+https://gentoo.org,meta distribution linux
+https://openbsd.org,security oriented bsd
+https://fedora.org,innovative linux platform
+https://manjaro.org,user friendly arch linux
+
+# --- HARDWARE & SEMICONDUCTORS ---
+https://intel.com,semiconductor innovation
+https://amd.com,high performance computing
+https://nvidia.com,gpu and ai hardware
+https://arm.com,global processor architecture
+https://asml.com,photolithography systems
+https://tsmc.com,semiconductor manufacturing
+https://qualcomm.com,mobile technology research
+https://ti.com,analog and embedded processing
+https://broadcom.com,infrastructure and connectivity
+https://samsung.com/global,global technology solutions

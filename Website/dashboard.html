@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UniFied Explorer | Live Node Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background:
+                radial-gradient(circle at top right, rgba(14, 116, 144, 0.24), transparent 36%),
+                radial-gradient(circle at top left, rgba(37, 99, 235, 0.16), transparent 32%),
+                #09111f;
+        }
+
+        .glass {
+            background: rgba(12, 19, 33, 0.82);
+            border: 1px solid rgba(148, 163, 184, 0.12);
+            backdrop-filter: blur(20px);
+        }
+
+        .chip {
+            border: 1px solid rgba(96, 165, 250, 0.28);
+            background: rgba(30, 64, 175, 0.16);
+        }
+
+        .item-button:hover {
+            border-color: rgba(96, 165, 250, 0.42);
+            background: rgba(15, 23, 42, 0.92);
+        }
+    </style>
+</head>
+<body class="text-slate-100 min-h-screen">
+    <nav class="max-w-7xl mx-auto px-6 py-5 flex flex-wrap justify-between items-center gap-4">
+        <div class="flex items-center gap-4">
+            <a href="index.html" class="text-2xl font-black tracking-tight">UFI<span class="text-cyan-400">NI</span>FIED</a>
+            <span class="chip text-xs px-3 py-1 rounded-full text-cyan-200">Live Node Dashboard</span>
+        </div>
+        <div class="flex items-center gap-5 text-sm text-slate-300">
+            <a href="index.html" class="hover:text-cyan-300 transition">Home</a>
+            <a href="search.html" class="hover:text-cyan-300 transition">Search</a>
+            <a href="dashboard.html" class="text-cyan-300">Explorer</a>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto px-6 pb-14">
+        <section class="grid lg:grid-cols-[1.4fr_0.95fr] gap-6 items-start mb-6">
+            <div class="glass rounded-3xl p-8">
+                <p class="uppercase tracking-[0.28em] text-xs text-slate-400 mb-4">Browser RPC</p>
+                <h1 class="text-4xl md:text-5xl font-black tracking-tight mb-4">
+                    Inspect the UniFied node directly from the web.
+                </h1>
+                <p class="text-slate-300 max-w-2xl leading-7">
+                    This page calls the UniFied JSON-RPC API over CORS. Point it at a node that has
+                    <code class="text-cyan-300">UNIFIED_RPC_CORS_ORIGINS</code> configured for your site and use the
+                    inspector to move from block to transaction to crawl proof.
+                </p>
+            </div>
+
+            <div class="glass rounded-3xl p-6">
+                <label class="block text-sm text-slate-300 mb-2" for="rpcUrl">RPC Endpoint</label>
+                <div class="flex gap-3">
+                    <input id="rpcUrl" class="w-full rounded-2xl bg-slate-950/80 border border-slate-800 px-4 py-3 outline-none focus:border-cyan-400" placeholder="https://node.example/rpc">
+                    <button id="connectButton" class="rounded-2xl bg-cyan-500 text-slate-950 font-semibold px-5 py-3 hover:bg-cyan-400 transition">
+                        Connect
+                    </button>
+                </div>
+                <p class="text-xs text-slate-400 mt-3">
+                    Use a full RPC URL ending in <code>/rpc</code>. If your site is HTTPS, your node endpoint also needs HTTPS.
+                </p>
+                <div id="statusBanner" class="mt-4 hidden rounded-2xl px-4 py-3 text-sm"></div>
+            </div>
+        </section>
+
+        <section class="grid md:grid-cols-4 gap-4 mb-6">
+            <article class="glass rounded-2xl p-5">
+                <p class="text-xs uppercase tracking-[0.22em] text-slate-400 mb-2">Status</p>
+                <strong id="metricStatus" class="text-2xl font-semibold">Offline</strong>
+            </article>
+            <article class="glass rounded-2xl p-5">
+                <p class="text-xs uppercase tracking-[0.22em] text-slate-400 mb-2">Current Block</p>
+                <button id="metricBlockButton" class="text-left">
+                    <strong id="metricBlock" class="text-2xl font-semibold hover:text-cyan-300 transition">0</strong>
+                </button>
+            </article>
+            <article class="glass rounded-2xl p-5">
+                <p class="text-xs uppercase tracking-[0.22em] text-slate-400 mb-2">Network</p>
+                <strong id="metricNetwork" class="text-2xl font-semibold">Unknown</strong>
+            </article>
+            <article class="glass rounded-2xl p-5">
+                <p class="text-xs uppercase tracking-[0.22em] text-slate-400 mb-2">Bootnodes</p>
+                <strong id="metricBootnodes" class="text-2xl font-semibold">0</strong>
+            </article>
+        </section>
+
+        <section class="grid xl:grid-cols-[1.2fr_1.2fr_0.9fr] gap-6">
+            <div class="space-y-6">
+                <section class="glass rounded-3xl p-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <div>
+                            <p class="uppercase tracking-[0.22em] text-xs text-slate-400 mb-2">Recent Activity</p>
+                            <h2 class="text-2xl font-bold">Latest confirmed chain events</h2>
+                        </div>
+                        <button id="refreshButton" class="rounded-2xl border border-slate-700 px-4 py-2 text-sm hover:border-cyan-400 hover:text-cyan-300 transition">
+                            Refresh
+                        </button>
+                    </div>
+                    <div class="grid md:grid-cols-2 gap-4">
+                        <div>
+                            <p class="text-sm text-slate-400 mb-3">Transactions</p>
+                            <div id="transactionsList" class="space-y-3"></div>
+                        </div>
+                        <div>
+                            <p class="text-sm text-slate-400 mb-3">Crawl Proofs</p>
+                            <div id="proofsList" class="space-y-3"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="glass rounded-3xl p-6">
+                    <div class="flex flex-wrap gap-3 items-end justify-between mb-4">
+                        <div>
+                            <p class="uppercase tracking-[0.22em] text-xs text-slate-400 mb-2">Address Activity</p>
+                            <h2 class="text-2xl font-bold">Lookup a UFI or UNS identity</h2>
+                        </div>
+                        <form id="lookupForm" class="flex flex-wrap gap-3">
+                            <input id="lookupInput" class="rounded-2xl bg-slate-950/80 border border-slate-800 px-4 py-3 min-w-[260px] outline-none focus:border-cyan-400" placeholder="Architect or UFI...">
+                            <button class="rounded-2xl bg-slate-100 text-slate-950 font-semibold px-5 py-3 hover:bg-white transition" type="submit">
+                                Inspect
+                            </button>
+                        </form>
+                    </div>
+                    <div id="lookupSummary" class="hidden rounded-2xl border border-slate-800 bg-slate-950/60 p-4 mb-4"></div>
+                    <div class="grid md:grid-cols-2 gap-4">
+                        <div>
+                            <p class="text-sm text-slate-400 mb-3">Transactions</p>
+                            <div id="addressTransactionsList" class="space-y-3"></div>
+                        </div>
+                        <div>
+                            <p class="text-sm text-slate-400 mb-3">Crawl Proofs</p>
+                            <div id="addressProofsList" class="space-y-3"></div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <section class="glass rounded-3xl p-6">
+                <div class="flex flex-wrap gap-3 items-end justify-between mb-4">
+                    <div>
+                        <p class="uppercase tracking-[0.22em] text-xs text-slate-400 mb-2">Inspector</p>
+                        <h2 class="text-2xl font-bold">Selected object</h2>
+                    </div>
+                    <button id="clearInspectorButton" class="rounded-2xl border border-slate-700 px-4 py-2 text-sm hover:border-cyan-400 hover:text-cyan-300 transition">
+                        Clear
+                    </button>
+                </div>
+                <div id="inspector" class="space-y-4 text-sm text-slate-200">
+                    <p class="text-slate-400">Click a block, transaction, proof, or address activity row to reveal more detail here.</p>
+                </div>
+            </section>
+
+            <section class="glass rounded-3xl p-6">
+                <p class="uppercase tracking-[0.22em] text-xs text-slate-400 mb-2">Network Details</p>
+                <h2 class="text-2xl font-bold mb-4">Protocol metadata</h2>
+                <div id="networkDetails" class="space-y-3 text-sm text-slate-300"></div>
+            </section>
+        </section>
+    </main>
+
+    <script>
+        const storageKey = "unified.website.rpc";
+        const initialRpc = new URLSearchParams(window.location.search).get("rpc")
+            || localStorage.getItem(storageKey)
+            || ((window.location.origin && window.location.origin !== "null")
+                ? `${window.location.origin.replace(/\/$/, "")}/rpc`
+                : "http://127.0.0.1:8545/rpc");
+
+        const state = {
+            rpcUrl: normalizeRpcUrl(initialRpc),
+            latestBlock: null,
+            network: null,
+            health: null,
+            recentActivity: null,
+            lookup: null,
+            selected: null
+        };
+
+        const rpcInput = document.getElementById("rpcUrl");
+        const statusBanner = document.getElementById("statusBanner");
+        const transactionsList = document.getElementById("transactionsList");
+        const proofsList = document.getElementById("proofsList");
+        const addressTransactionsList = document.getElementById("addressTransactionsList");
+        const addressProofsList = document.getElementById("addressProofsList");
+        const lookupSummary = document.getElementById("lookupSummary");
+        const inspector = document.getElementById("inspector");
+        const networkDetails = document.getElementById("networkDetails");
+
+        rpcInput.value = state.rpcUrl;
+
+        function normalizeRpcUrl(value) {
+            const cleaned = (value || "").trim();
+            if (!cleaned) return "";
+            return cleaned.endsWith("/rpc") ? cleaned : `${cleaned.replace(/\/$/, "")}/rpc`;
+        }
+
+        function setBanner(message, mode = "info") {
+            statusBanner.classList.remove("hidden", "bg-emerald-500/10", "text-emerald-200", "border-emerald-500/20", "bg-rose-500/10", "text-rose-200", "border-rose-500/20", "bg-slate-500/10", "text-slate-200", "border-slate-500/20");
+            if (mode === "error") {
+                statusBanner.classList.add("bg-rose-500/10", "text-rose-200", "border", "border-rose-500/20");
+            } else if (mode === "success") {
+                statusBanner.classList.add("bg-emerald-500/10", "text-emerald-200", "border", "border-emerald-500/20");
+            } else {
+                statusBanner.classList.add("bg-slate-500/10", "text-slate-200", "border", "border-slate-500/20");
+            }
+            statusBanner.textContent = message;
+        }
+
+        async function rpc(method, params = {}) {
+            const response = await fetch(state.rpcUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: Date.now(),
+                    method,
+                    params
+                })
+            });
+
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || payload.error) {
+                throw new Error(payload.error?.message || `HTTP ${response.status}`);
+            }
+            return payload.result;
+        }
+
+        function formatDate(value) {
+            if (!value) return "Unknown";
+            const parsed = new Date(value);
+            return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+        }
+
+        function truncate(value, start = 12, end = 10) {
+            if (!value || value.length <= start + end + 3) return value || "";
+            return `${value.slice(0, start)}...${value.slice(-end)}`;
+        }
+
+        function ufd(units) {
+            const value = Number(units);
+            if (!Number.isFinite(value)) return units;
+            return (value / 10000).toFixed(4);
+        }
+
+        function renderEmpty(target, label) {
+            target.innerHTML = `<div class="rounded-2xl border border-dashed border-slate-800 px-4 py-6 text-slate-500 text-sm">${label}</div>`;
+        }
+
+        function renderItemList(target, items, type, onClick, emptyLabel) {
+            if (!items || items.length === 0) {
+                renderEmpty(target, emptyLabel);
+                return;
+            }
+
+            target.innerHTML = items.map((entry) => {
+                if (type === "transaction") {
+                    return `
+                        <button data-kind="transaction" data-hash="${entry.transaction.hash}" class="item-button w-full text-left rounded-2xl border border-slate-800 bg-slate-950/55 p-4 transition">
+                            <div class="flex justify-between gap-3 mb-2">
+                                <strong class="text-slate-100">${entry.transaction.type}</strong>
+                                <span class="text-xs text-cyan-300">block #${entry.blockNumber}</span>
+                            </div>
+                            <div class="text-xs text-slate-400 font-mono">${truncate(entry.transaction.hash, 16, 12)}</div>
+                            <div class="mt-2 text-xs text-slate-500">${truncate(entry.transaction.from, 12, 8)} → ${truncate(entry.transaction.to || "system", 12, 8)}</div>
+                        </button>
+                    `;
+                }
+
+                return `
+                    <button data-kind="proof" data-task-hash="${entry.proof.taskTxHash}" data-task-id="${entry.proof.taskId}" class="item-button w-full text-left rounded-2xl border border-slate-800 bg-slate-950/55 p-4 transition">
+                        <div class="flex justify-between gap-3 mb-2">
+                            <strong class="text-slate-100">${truncate(entry.proof.url, 28, 12)}</strong>
+                            <span class="text-xs text-cyan-300">block #${entry.blockNumber}</span>
+                        </div>
+                        <div class="text-xs text-slate-400">${entry.proof.query}</div>
+                        <div class="mt-2 text-xs text-slate-500">${ufd(entry.proof.minerReward)} UFD miner reward</div>
+                    </button>
+                `;
+            }).join("");
+
+            target.querySelectorAll("button").forEach((button) => {
+                button.addEventListener("click", () => onClick(button.dataset));
+            });
+        }
+
+        function renderInspector() {
+            if (!state.selected) {
+                inspector.innerHTML = `<p class="text-slate-400">Click a block, transaction, proof, or address activity row to reveal more detail here.</p>`;
+                return;
+            }
+
+            const selected = state.selected;
+            if (selected.kind === "network") {
+                inspector.innerHTML = `
+                    <div class="space-y-3">
+                        <div class="flex justify-between gap-3 items-start">
+                            <h3 class="text-xl font-bold">${selected.payload.name}</h3>
+                            <span class="chip px-3 py-1 rounded-full text-xs text-cyan-200">Chain ${selected.payload.chainId}</span>
+                        </div>
+                        <div class="rounded-2xl bg-slate-950/55 border border-slate-800 p-4 space-y-2">
+                            <div><span class="text-slate-500">Genesis:</span> <code class="text-cyan-300 break-all">${selected.payload.genesisAddress}</code></div>
+                            <div><span class="text-slate-500">Architect:</span> <code class="text-cyan-300 break-all">${selected.payload.architectAddress}</code></div>
+                            <div><span class="text-slate-500">Circulating Supply:</span> ${ufd(selected.payload.circulatingSupply)} UFD</div>
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            if (selected.kind === "block") {
+                const block = selected.payload;
+                inspector.innerHTML = `
+                    <div class="space-y-3">
+                        <div class="flex justify-between gap-3 items-start">
+                            <h3 class="text-xl font-bold">Block #${block.header.number}</h3>
+                            <button data-address="${block.header.miner}" class="inspect-address chip px-3 py-1 rounded-full text-xs text-cyan-200">Miner</button>
+                        </div>
+                        <div class="rounded-2xl bg-slate-950/55 border border-slate-800 p-4 space-y-2">
+                            <div><span class="text-slate-500">Hash:</span> <code class="text-cyan-300 break-all">${block.hash}</code></div>
+                            <div><span class="text-slate-500">Parent:</span> <code class="text-cyan-300 break-all">${block.header.parentHash || "genesis"}</code></div>
+                            <div><span class="text-slate-500">Timestamp:</span> ${formatDate(block.header.timestamp)}</div>
+                            <div><span class="text-slate-500">Transactions:</span> ${block.body.transactions?.length || 0}</div>
+                            <div><span class="text-slate-500">Crawl proofs:</span> ${block.body.crawlProofs?.length || 0}</div>
+                        </div>
+                    </div>
+                `;
+                wireInspectorActions();
+                return;
+            }
+
+            if (selected.kind === "transaction") {
+                const entry = selected.payload;
+                const tx = entry.transaction;
+                inspector.innerHTML = `
+                    <div class="space-y-3">
+                        <div class="flex justify-between gap-3 items-start">
+                            <h3 class="text-xl font-bold">${tx.type}</h3>
+                            <button data-block-hash="${entry.blockHash}" class="inspect-block chip px-3 py-1 rounded-full text-xs text-cyan-200">Open Block</button>
+                        </div>
+                        <div class="rounded-2xl bg-slate-950/55 border border-slate-800 p-4 space-y-2">
+                            <div><span class="text-slate-500">Hash:</span> <code class="text-cyan-300 break-all">${tx.hash}</code></div>
+                            <div><span class="text-slate-500">From:</span> <button data-address="${tx.from}" class="inspect-address text-cyan-300 break-all">${tx.from}</button></div>
+                            <div><span class="text-slate-500">To:</span> ${tx.to ? `<button data-address="${tx.to}" class="inspect-address text-cyan-300 break-all">${tx.to}</button>` : "system"}</div>
+                            <div><span class="text-slate-500">Value:</span> ${ufd(tx.value)} UFD</div>
+                            <div><span class="text-slate-500">Nonce:</span> ${tx.nonce}</div>
+                            <div><span class="text-slate-500">Timestamp:</span> ${formatDate(tx.timestamp)}</div>
+                        </div>
+                    </div>
+                `;
+                wireInspectorActions();
+                return;
+            }
+
+            if (selected.kind === "proof") {
+                const entry = selected.payload;
+                const proof = entry.proof;
+                inspector.innerHTML = `
+                    <div class="space-y-3">
+                        <div class="flex justify-between gap-3 items-start">
+                            <h3 class="text-xl font-bold">${proof.page.title || truncate(proof.url, 28, 10)}</h3>
+                            <button data-block-hash="${entry.blockHash}" class="inspect-block chip px-3 py-1 rounded-full text-xs text-cyan-200">Open Block</button>
+                        </div>
+                        <div class="rounded-2xl bg-slate-950/55 border border-slate-800 p-4 space-y-2">
+                            <div><span class="text-slate-500">URL:</span> <code class="text-cyan-300 break-all">${proof.url}</code></div>
+                            <div><span class="text-slate-500">Query:</span> ${proof.query}</div>
+                            <div><span class="text-slate-500">Task Tx:</span> <button data-transaction-hash="${proof.taskTxHash}" class="inspect-transaction text-cyan-300 break-all">${proof.taskTxHash}</button></div>
+                            <div><span class="text-slate-500">Miner:</span> <button data-address="${proof.miner}" class="inspect-address text-cyan-300 break-all">${proof.miner}</button></div>
+                            <div><span class="text-slate-500">Miner Reward:</span> ${ufd(proof.minerReward)} UFD</div>
+                            <div><span class="text-slate-500">Architect Fee:</span> ${ufd(proof.architectFee)} UFD</div>
+                            <div><span class="text-slate-500">Snippet:</span> ${proof.page.snippet || proof.page.body.slice(0, 220)}</div>
+                        </div>
+                    </div>
+                `;
+                wireInspectorActions();
+            }
+        }
+
+        function wireInspectorActions() {
+            inspector.querySelectorAll(".inspect-address").forEach((button) => {
+                button.addEventListener("click", () => inspectAddress(button.dataset.address));
+            });
+            inspector.querySelectorAll(".inspect-block").forEach((button) => {
+                button.addEventListener("click", () => inspectBlockByHash(button.dataset.blockHash));
+            });
+            inspector.querySelectorAll(".inspect-transaction").forEach((button) => {
+                button.addEventListener("click", () => inspectTransaction(button.dataset.transactionHash));
+            });
+        }
+
+        function renderMetrics() {
+            document.getElementById("metricStatus").textContent = state.health?.status || "Offline";
+            document.getElementById("metricBlock").textContent = state.latestBlock?.header?.number ?? 0;
+            document.getElementById("metricNetwork").textContent = state.network?.name || "Unknown";
+            document.getElementById("metricBootnodes").textContent = state.network?.bootnodes?.length ?? 0;
+        }
+
+        function renderNetworkDetails() {
+            if (!state.network) {
+                networkDetails.innerHTML = `<p class="text-slate-400">Connect to a node to load network metadata.</p>`;
+                return;
+            }
+
+            networkDetails.innerHTML = `
+                <div class="rounded-2xl bg-slate-950/55 border border-slate-800 p-4 space-y-2">
+                    <div><span class="text-slate-500">Name:</span> ${state.network.name}</div>
+                    <div><span class="text-slate-500">Chain ID:</span> ${state.network.chainId}</div>
+                    <div><span class="text-slate-500">Genesis:</span> <button data-address="${state.network.genesisAddress}" class="network-address text-cyan-300 break-all">${state.network.genesisAddress}</button></div>
+                    <div><span class="text-slate-500">Architect:</span> <button data-address="${state.network.architectAddress}" class="network-address text-cyan-300 break-all">${state.network.architectAddress}</button></div>
+                </div>
+                <div class="rounded-2xl bg-slate-950/55 border border-slate-800 p-4">
+                    <p class="text-slate-500 mb-2">Bootnodes</p>
+                    ${(state.network.bootnodes && state.network.bootnodes.length)
+                        ? state.network.bootnodes.map((bootnode) => `<div class="text-xs text-cyan-300 break-all mb-2">${bootnode}</div>`).join("")
+                        : `<p class="text-slate-400">No bootnodes published.</p>`}
+                </div>
+            `;
+
+            networkDetails.querySelectorAll(".network-address").forEach((button) => {
+                button.addEventListener("click", () => inspectAddress(button.dataset.address));
+            });
+        }
+
+        async function loadDashboard() {
+            state.rpcUrl = normalizeRpcUrl(rpcInput.value);
+            if (!state.rpcUrl) {
+                setBanner("Enter an RPC endpoint first.", "error");
+                return;
+            }
+
+            rpcInput.value = state.rpcUrl;
+
+            localStorage.setItem(storageKey, state.rpcUrl);
+            setBanner("Connecting to node...", "info");
+
+            try {
+                const [health, network, latestBlock, recentActivity] = await Promise.all([
+                    fetch(state.rpcUrl.replace(/\/rpc$/, "/healthz")).then((response) => response.json()),
+                    rpc("ufi_getNetworkConfig", {}),
+                    rpc("ufi_getBlockByNumber", { number: "latest" }),
+                    rpc("ufi_getRecentActivity", { limit: 6 })
+                ]);
+
+                state.health = health;
+                state.network = network;
+                state.latestBlock = latestBlock;
+                state.recentActivity = recentActivity;
+
+                renderMetrics();
+                renderNetworkDetails();
+                renderItemList(transactionsList, recentActivity.transactions, "transaction", ({ hash }) => inspectTransaction(hash), "No recent transactions.");
+                renderItemList(proofsList, recentActivity.proofs, "proof", ({ taskHash, taskId }) => inspectProof(taskHash, taskId), "No recent crawl proofs.");
+                state.selected = { kind: "network", payload: network };
+                renderInspector();
+                setBanner(`Connected to ${network.name} at block #${latestBlock.header.number}.`, "success");
+            } catch (error) {
+                renderEmpty(transactionsList, "Unable to load transactions.");
+                renderEmpty(proofsList, "Unable to load crawl proofs.");
+                setBanner(error.message.includes("Failed to fetch")
+                    ? "Request failed. Check the RPC URL, CORS allowlist, and whether the node is reachable from this site."
+                    : error.message, "error");
+            }
+        }
+
+        async function inspectAddress(raw) {
+            if (!raw) return;
+            try {
+                let address = raw.trim();
+                let alias = "";
+
+                if (!address.startsWith("UFI")) {
+                    const resolved = await rpc("ufi_resolveName", { name: address.replace(/^@+/, "") });
+                    if (!resolved.found || !resolved.owner) {
+                        throw new Error("UNS name could not be resolved.");
+                    }
+                    address = resolved.owner;
+                    alias = resolved.name || address.replace(/^@+/, "");
+                }
+
+                const activity = await rpc("ufi_getAddressActivity", { address, limit: 6 });
+                state.lookup = activity;
+
+                lookupSummary.classList.remove("hidden");
+                lookupSummary.innerHTML = `
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <div class="text-lg font-semibold">${alias ? `@${alias}` : truncate(activity.address, 20, 12)}</div>
+                            <div class="text-xs text-slate-400 font-mono break-all">${activity.address}</div>
+                        </div>
+                        <div class="flex gap-2">
+                            <span class="chip px-3 py-1 rounded-full text-xs text-cyan-200">${ufd(activity.balance)} UFD</span>
+                            <span class="chip px-3 py-1 rounded-full text-xs text-cyan-200">nonce ${activity.latestNonce}</span>
+                        </div>
+                    </div>
+                `;
+
+                renderItemList(addressTransactionsList, activity.transactions, "transaction", ({ hash }) => inspectTransaction(hash), "No transactions for this address.");
+                renderItemList(addressProofsList, activity.proofs, "proof", ({ taskHash, taskId }) => inspectProof(taskHash, taskId), "No crawl proofs for this address.");
+                setBanner(`Loaded activity for ${alias ? `@${alias}` : truncate(activity.address, 16, 10)}.`, "success");
+            } catch (error) {
+                renderEmpty(addressTransactionsList, "Unable to load address transactions.");
+                renderEmpty(addressProofsList, "Unable to load address proofs.");
+                setBanner(error.message, "error");
+            }
+        }
+
+        async function inspectTransaction(hash) {
+            if (!hash) return;
+            try {
+                const transaction = await rpc("ufi_getTransactionByHash", { hash });
+                state.selected = { kind: "transaction", payload: transaction };
+                renderInspector();
+            } catch (error) {
+                setBanner(error.message, "error");
+            }
+        }
+
+        async function inspectProof(taskHash, taskId) {
+            if (!taskHash && !taskId) return;
+            try {
+                const proof = await rpc("ufi_getCrawlProof", { taskTxHash: taskHash, taskId });
+                state.selected = { kind: "proof", payload: proof };
+                renderInspector();
+            } catch (error) {
+                setBanner(error.message, "error");
+            }
+        }
+
+        async function inspectBlockByHash(hash) {
+            if (!hash) return;
+            try {
+                const block = await rpc("ufi_getBlockByHash", { hash });
+                state.selected = { kind: "block", payload: block };
+                renderInspector();
+            } catch (error) {
+                setBanner(error.message, "error");
+            }
+        }
+
+        document.getElementById("connectButton").addEventListener("click", loadDashboard);
+        document.getElementById("refreshButton").addEventListener("click", loadDashboard);
+        document.getElementById("metricBlockButton").addEventListener("click", () => {
+            if (state.latestBlock) {
+                state.selected = { kind: "block", payload: state.latestBlock };
+                renderInspector();
+            }
+        });
+        document.getElementById("clearInspectorButton").addEventListener("click", () => {
+            state.selected = null;
+            renderInspector();
+        });
+        document.getElementById("lookupForm").addEventListener("submit", (event) => {
+            event.preventDefault();
+            inspectAddress(document.getElementById("lookupInput").value);
+        });
+
+        loadDashboard();
+    </script>
+</body>
+</html>

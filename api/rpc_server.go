@@ -81,6 +81,10 @@ type getBlockParams struct {
 	Number string `json:"number"`
 }
 
+type getBlockByHashParams struct {
+	Hash string `json:"hash"`
+}
+
 type getSearchDataParams struct {
 	URL  string `json:"url"`
 	Term string `json:"term"`
@@ -105,6 +109,24 @@ type resolveNameParams struct {
 
 type reverseResolveParams struct {
 	Address string `json:"address"`
+}
+
+type getRecentActivityParams struct {
+	Limit uint64 `json:"limit,omitempty"`
+}
+
+type getAddressActivityParams struct {
+	Address string `json:"address"`
+	Limit   uint64 `json:"limit,omitempty"`
+}
+
+type getTransactionByHashParams struct {
+	Hash string `json:"hash"`
+}
+
+type getCrawlProofParams struct {
+	TaskTxHash string `json:"taskTxHash,omitempty"`
+	TaskID     string `json:"taskId,omitempty"`
 }
 
 type callParams struct {
@@ -305,6 +327,52 @@ func (s *RPCServer) handle(r rpcRequest) (any, *rpcError) {
 			return nil, rpcFailure(err)
 		}
 		return block, nil
+	case "ufi_getBlockByHash":
+		var params getBlockByHashParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		block, err := s.Blockchain.GetBlockByHash(strings.TrimSpace(params.Hash))
+		if err != nil {
+			return nil, rpcFailure(err)
+		}
+		return block, nil
+	case "ufi_getRecentActivity":
+		var params getRecentActivityParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.Blockchain.RecentActivity(params.Limit), nil
+	case "ufi_getAddressActivity":
+		var params getAddressActivityParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		activity, err := s.Blockchain.AddressActivity(params.Address, params.Limit)
+		if err != nil {
+			return nil, invalidParams(err)
+		}
+		return activity, nil
+	case "ufi_getTransactionByHash":
+		var params getTransactionByHashParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		transaction, err := s.Blockchain.TransactionByHash(params.Hash)
+		if err != nil {
+			return nil, rpcFailure(err)
+		}
+		return transaction, nil
+	case "ufi_getCrawlProof":
+		var params getCrawlProofParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		proof, err := s.Blockchain.CrawlProofByTask(params.TaskTxHash, params.TaskID)
+		if err != nil {
+			return nil, rpcFailure(err)
+		}
+		return proof, nil
 	case "ufi_submitSearchTask":
 		var params submitSearchTaskParams
 		if err := decodeParams(r.Params, &params); err != nil {

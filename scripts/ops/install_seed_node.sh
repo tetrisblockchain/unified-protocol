@@ -24,6 +24,7 @@ UNIFIED_NETWORK_NAME_VALUE="${UNIFIED_NETWORK_NAME:-unified-mainnet}"
 UNIFIED_CHAIN_ID_VALUE="${UNIFIED_CHAIN_ID:-333}"
 UNIFIED_RPC_HOST_VALUE="${UNIFIED_RPC_HOST:-127.0.0.1}"
 UNIFIED_RPC_PORT_VALUE="${UNIFIED_RPC_PORT:-8545}"
+UNIFIED_RPC_CORS_ORIGINS_VALUE="${UNIFIED_RPC_CORS_ORIGINS:-}"
 UNIFIED_P2P_LISTEN_VALUE="${UNIFIED_P2P_LISTEN:-/ip4/0.0.0.0/tcp/4001}"
 UNIFIED_BOOTNODES_VALUE="${UNIFIED_BOOTNODES:-}"
 UNIFIED_GENESIS_ADDRESS_VALUE="${UNIFIED_GENESIS_ADDRESS:-UFI_MAINNET_GENESIS_REPLACE_ME}"
@@ -70,6 +71,7 @@ Relevant environment variables:
   UNIFIED_CHAIN_ID
   UNIFIED_RPC_HOST
   UNIFIED_RPC_PORT
+  UNIFIED_RPC_CORS_ORIGINS
   UNIFIED_P2P_LISTEN
   UNIFIED_BOOTNODES
   UNIFIED_GENESIS_ADDRESS
@@ -81,6 +83,7 @@ Relevant environment variables:
 
 Notes:
   - RPC binds to 127.0.0.1 by default. Keep it private and tunnel or reverse-proxy it deliberately.
+  - Set UNIFIED_RPC_CORS_ORIGINS to a comma-separated allowlist, or * for public browser access.
   - Shared network settings are written to a JSON manifest referenced by the env file.
   - Set UNIFIED_NETWORK_CONFIG_SOURCE to copy one exact pinned manifest instead of rendering from env values.
   - Starting the service is blocked when placeholder values remain in either file.
@@ -342,6 +345,7 @@ write_env_file() {
 		DATA_DIR "$DATA_DIR" \
 		RPC_HOST "$UNIFIED_RPC_HOST_VALUE" \
 		RPC_PORT "$UNIFIED_RPC_PORT_VALUE" \
+		RPC_CORS_ORIGINS "$UNIFIED_RPC_CORS_ORIGINS_VALUE" \
 		P2P_LISTEN "$UNIFIED_P2P_LISTEN_VALUE" \
 		NETWORK_CONFIG "$NETWORK_CONFIG_PATH" \
 		OPERATOR_ADDRESS "$UNIFIED_OPERATOR_ADDRESS_VALUE" \

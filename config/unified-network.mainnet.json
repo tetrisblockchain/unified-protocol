@@ -1,0 +1,70 @@
+{
+  "name": "unified-mainnet",
+  "chainId": 333,
+  "genesisAddress": "UFIVqDmxAjSgn57sNyv6QCEAWDCBDDbGybEZ",
+  "architectAddress": "UFIVqDmxAjSgn57sNyv6QCEAWDCBDDbGybEZ",
+  "circulatingSupply": "1000000",
+  "systemContracts": [
+    {
+      "address": "0x101",
+      "name": "SearchPrecompile",
+      "kind": "precompile",
+      "handler": "search-index",
+      "code": "0xfe5546497b2270726f746f636f6c223a22556e69466965642f53797374656d436f6e74726163742f7631222c2261646472657373223a223078313031222c226e616d65223a22536561726368507265636f6d70696c65222c226b696e64223a22707265636f6d70696c65222c2268616e646c6572223a227365617263682d696e646578222c2266756e6374696f6e73223a5b7b227369676e6174757265223a226d656e74696f6e4672657175656e637928737472696e6729222c2273656c6563746f72223a2230783165366637333264222c226d75746162696c697479223a2276696577227d5d7d",
+      "codeHash": "0x96da2df5118a904c470dd3eb69453bc2902b67a0e16c7599a5647b497f4bdeda",
+      "description": "System search precompile exposing mention-frequency reads against the local crawl ledger.",
+      "system": true,
+      "executable": false,
+      "genesisDeployed": true,
+      "deploymentBlock": 0,
+      "deploymentModel": "native-protocol-contract",
+      "functions": [
+        {
+          "signature": "mentionFrequency(string)",
+          "selector": "0x1e6f732d",
+          "mutability": "view"
+        }
+      ],
+      "source": "protocol://system/search-precompile",
+      "storageModel": "derived from search index state"
+    },
+    {
+      "address": "0x102",
+      "name": "UNSRegistry",
+      "kind": "system-contract",
+      "handler": "uns-registry",
+      "code": "0xfe5546497b2270726f746f636f6c223a22556e69466965642f53797374656d436f6e74726163742f7631222c2261646472657373223a223078313032222c226e616d65223a22554e535265676973747279222c226b696e64223a2273797374656d2d636f6e7472616374222c2268616e646c6572223a22756e732d7265676973747279222c2266756e6374696f6e73223a5b7b227369676e6174757265223a22726567697374657228737472696e6729222c2273656c6563746f72223a2230786632633239386265222c226d75746162696c697479223a226e6f6e70617961626c65227d2c7b227369676e6174757265223a2272656769737465724e616d6528737472696e6729222c2273656c6563746f72223a2230783038333036303262222c226d75746162696c697479223a226e6f6e70617961626c65227d2c7b227369676e6174757265223a22726567697374726174696f6e507269636528737472696e6729222c2273656c6563746f72223a2230783862646434386363222c226d75746162696c697479223a2276696577227d2c7b227369676e6174757265223a226d656e74696f6e4672657175656e637928737472696e6729222c2273656c6563746f72223a2230783165366637333264222c226d75746162696c697479223a2276696577227d5d7d",
+      "codeHash": "0xaf202a3239128e5ab438c0e27f8f71a12f1e3cf4e70f471025d48ec2330b060d",
+      "description": "System UNS registry contract with popularity-based pricing and architect fee enforcement.",
+      "system": true,
+      "executable": false,
+      "genesisDeployed": true,
+      "deploymentBlock": 0,
+      "deploymentModel": "native-protocol-contract",
+      "functions": [
+        {
+          "signature": "register(string)",
+          "selector": "0xf2c298be",
+          "mutability": "nonpayable"
+        },
+        {
+          "signature": "registerName(string)",
+          "selector": "0x0830602b",
+          "mutability": "nonpayable"
+        },
+        {
+          "signature": "registrationPrice(string)",
+          "selector": "0x8bdd48cc",
+          "mutability": "view"
+        },
+        {
+          "signature": "mentionFrequency(string)",
+          "selector": "0x1e6f732d",
+          "mutability": "view"
+        }
+      ],
+      "source": "protocol://system/uns-registry",
+      "storageModel": "derived from names, balances, and mention counts"
+    }
+  ]
+}

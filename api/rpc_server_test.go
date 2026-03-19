@@ -401,3 +401,163 @@ func TestRPCServerResolveAndReverseResolve(t *testing.T) {
 		t.Fatalf("ufi_reverseResolve body = %s, want Architect", reverseResponse.Body.String())
 	}
 }
+
+func TestRPCServerActivityEndpoints(t *testing.T) {
+	t.Parallel()
+
+	senderPublicKey, senderPrivateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey sender returned error: %v", err)
+	}
+	sender, err := types.NewAddressFromPubKey(senderPublicKey)
+	if err != nil {
+		t.Fatalf("NewAddressFromPubKey sender returned error: %v", err)
+	}
+
+	recipientPublicKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey recipient returned error: %v", err)
+	}
+	recipient, err := types.NewAddressFromPubKey(recipientPublicKey)
+	if err != nil {
+		t.Fatalf("NewAddressFromPubKey recipient returned error: %v", err)
+	}
+
+	chain, err := core.OpenBlockchain(core.BlockchainConfig{
+		DataDir: filepath.Join(t.TempDir(), "chain"),
+		GenesisBalances: map[string]*big.Int{
+			sender.String(): big.NewInt(1_000_000),
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenBlockchain returned error: %v", err)
+	}
+	defer chain.Close()
+
+	transfer := core.Transaction{
+		Type:      core.TxTypeTransfer,
+		From:      sender.String(),
+		To:        recipient.String(),
+		Value:     "25000",
+		Nonce:     0,
+		Timestamp: time.Unix(1_700_000_000, 0).UTC(),
+	}
+	if err := transfer.Sign(senderPrivateKey); err != nil {
+		t.Fatalf("Sign transfer returned error: %v", err)
+	}
+	if _, err := chain.MineBlock("UFI_TEST_MINER", []core.Transaction{transfer}, nil); err != nil {
+		t.Fatalf("MineBlock transfer returned error: %v", err)
+	}
+
+	request := core.SearchTaskRequest{
+		Query:           "distributed search",
+		URL:             "https://example.edu",
+		BaseBounty:      "100",
+		Difficulty:      1,
+		DataVolumeBytes: 10,
+	}
+	requestPayload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("Marshal search request returned error: %v", err)
+	}
+
+	searchTask := core.Transaction{
+		Type:      core.TxTypeSearchTask,
+		From:      sender.String(),
+		Value:     "110",
+		Nonce:     1,
+		Timestamp: time.Unix(1_700_000_060, 0).UTC(),
+		Data:      requestPayload,
+	}
+	if err := searchTask.Sign(senderPrivateKey); err != nil {
+		t.Fatalf("Sign search task returned error: %v", err)
+	}
+
+	envelope, err := core.BuildSearchTaskEnvelope(searchTask, request, consensus.NewPriorityRegistry())
+	if err != nil {
+		t.Fatalf("BuildSearchTaskEnvelope returned error: %v", err)
+	}
+
+	grossBounty, _ := new(big.Int).SetString(envelope.Transaction.Value, 10)
+	architectFee := coreconstants.ArchitectFee(grossBounty)
+	minerReward := new(big.Int).Sub(new(big.Int).Set(grossBounty), architectFee)
+	proof := core.CrawlProof{
+		TaskID:       envelope.Transaction.Hash,
+		TaskTxHash:   envelope.Transaction.Hash,
+		Query:        request.Query,
+		URL:          request.URL,
+		Miner:        "UFI_TEST_MINER",
+		GrossBounty:  grossBounty.String(),
+		ArchitectFee: architectFee.String(),
+		MinerReward:  minerReward.String(),
+		Page: consensus.IndexedPage{
+			URL:         request.URL,
+			Title:       "Example EDU",
+			Snippet:     "Distributed search result",
+			Body:        "Distributed search results for EDU domains.",
+			IndexedAt:   time.Unix(1_700_000_060, 0).UTC(),
+			ContentHash: "content-123",
+			SimHash:     42,
+		},
+	}
+	if _, err := chain.MineBlock("UFI_TEST_MINER", []core.Transaction{envelope.Transaction}, []core.CrawlProof{proof}); err != nil {
+		t.Fatalf("MineBlock search task returned error: %v", err)
+	}
+
+	server := NewRPCServer(chain, nil, nil)
+
+	recentPayload := `{"jsonrpc":"2.0","id":20,"method":"ufi_getRecentActivity","params":{"limit":4}}`
+	recentRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(recentPayload))
+	recentResponse := httptest.NewRecorder()
+	server.ServeHTTP(recentResponse, recentRequest)
+	if recentResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_getRecentActivity status = %d, want %d", recentResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(recentResponse.Body.String(), envelope.Transaction.Hash) || !strings.Contains(recentResponse.Body.String(), `"proof":{"taskId":"`+envelope.Transaction.Hash) {
+		t.Fatalf("ufi_getRecentActivity body = %s, want tx and proof activity", recentResponse.Body.String())
+	}
+
+	addressPayload := `{"jsonrpc":"2.0","id":21,"method":"ufi_getAddressActivity","params":{"address":"` + sender.String() + `","limit":6}}`
+	addressRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(addressPayload))
+	addressResponse := httptest.NewRecorder()
+	server.ServeHTTP(addressResponse, addressRequest)
+	if addressResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_getAddressActivity status = %d, want %d", addressResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(addressResponse.Body.String(), transfer.Hash) || !strings.Contains(addressResponse.Body.String(), envelope.Transaction.Hash) || !strings.Contains(addressResponse.Body.String(), `"taskTxHash":"`+envelope.Transaction.Hash) {
+		t.Fatalf("ufi_getAddressActivity body = %s, want transfer, task, and proof", addressResponse.Body.String())
+	}
+
+	txPayload := `{"jsonrpc":"2.0","id":22,"method":"ufi_getTransactionByHash","params":{"hash":"` + envelope.Transaction.Hash + `"}}`
+	txRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(txPayload))
+	txResponse := httptest.NewRecorder()
+	server.ServeHTTP(txResponse, txRequest)
+	if txResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_getTransactionByHash status = %d, want %d", txResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(txResponse.Body.String(), `"blockNumber":2`) || !strings.Contains(txResponse.Body.String(), envelope.Transaction.Hash) {
+		t.Fatalf("ufi_getTransactionByHash body = %s, want block number and hash", txResponse.Body.String())
+	}
+
+	proofPayload := `{"jsonrpc":"2.0","id":23,"method":"ufi_getCrawlProof","params":{"taskTxHash":"` + envelope.Transaction.Hash + `"}}`
+	proofRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(proofPayload))
+	proofResponse := httptest.NewRecorder()
+	server.ServeHTTP(proofResponse, proofRequest)
+	if proofResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_getCrawlProof status = %d, want %d", proofResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(proofResponse.Body.String(), `"url":"https://example.edu"`) || !strings.Contains(proofResponse.Body.String(), `"blockNumber":2`) {
+		t.Fatalf("ufi_getCrawlProof body = %s, want URL and block number", proofResponse.Body.String())
+	}
+
+	blockPayload := `{"jsonrpc":"2.0","id":24,"method":"ufi_getBlockByHash","params":{"hash":"` + chain.LatestBlock().Hash + `"}}`
+	blockRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(blockPayload))
+	blockResponse := httptest.NewRecorder()
+	server.ServeHTTP(blockResponse, blockRequest)
+	if blockResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_getBlockByHash status = %d, want %d", blockResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(blockResponse.Body.String(), `"hash":"`+chain.LatestBlock().Hash+`"`) {
+		t.Fatalf("ufi_getBlockByHash body = %s, want latest block hash", blockResponse.Body.String())
+	}
+}
