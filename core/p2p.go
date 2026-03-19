@@ -2,10 +2,13 @@ package core
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +16,7 @@ import (
 
 	libp2p "github.com/libp2p/go-libp2p"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -39,8 +43,9 @@ type ChainSyncProvider interface {
 }
 
 type P2PConfig struct {
-	ListenAddrs []string
-	Bootnodes   []string
+	ListenAddrs     []string
+	Bootnodes       []string
+	IdentityKeyPath string
 }
 
 type P2PNode struct {
@@ -75,7 +80,16 @@ func NewP2PNode(ctx context.Context, config P2PConfig, logger *log.Logger, chain
 		config.ListenAddrs = []string{"/ip4/0.0.0.0/tcp/0"}
 	}
 
-	host, err := libp2p.New(libp2p.ListenAddrStrings(config.ListenAddrs...))
+	options := []libp2p.Option{libp2p.ListenAddrStrings(config.ListenAddrs...)}
+	if strings.TrimSpace(config.IdentityKeyPath) != "" {
+		privateKey, err := loadOrCreateP2PIdentity(config.IdentityKeyPath)
+		if err != nil {
+			return nil, err
+		}
+		options = append(options, libp2p.Identity(privateKey))
+	}
+
+	host, err := libp2p.New(options...)
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +130,34 @@ func NewP2PNode(ctx context.Context, config P2PConfig, logger *log.Logger, chain
 		}
 	}
 	return node, nil
+}
+
+func loadOrCreateP2PIdentity(path string) (crypto.PrivKey, error) {
+	cleaned := strings.TrimSpace(path)
+	if cleaned == "" {
+		return nil, errors.New("empty p2p identity path")
+	}
+	if data, err := os.ReadFile(cleaned); err == nil {
+		return crypto.UnmarshalPrivateKey(data)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(cleaned), 0o755); err != nil {
+		return nil, err
+	}
+	privateKey, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := crypto.MarshalPrivateKey(privateKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(cleaned, encoded, 0o600); err != nil {
+		return nil, err
+	}
+	return privateKey, nil
 }
 
 func (p *P2PNode) Start(ctx context.Context) {

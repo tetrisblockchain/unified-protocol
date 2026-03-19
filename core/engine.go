@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,6 +65,29 @@ type Engine struct {
 	submitMu sync.Mutex
 	mu       sync.Mutex
 	inFlight bool
+
+	inFlightTransfers []Transaction
+	inFlightTasks     []SearchTaskEnvelope
+}
+
+type MempoolStatus struct {
+	PendingTransfers   int    `json:"pendingTransfers"`
+	PendingSearchTasks int    `json:"pendingSearchTasks"`
+	TransferCapacity   int    `json:"transferCapacity"`
+	SearchTaskCapacity int    `json:"searchTaskCapacity"`
+	SenderPendingLimit int    `json:"senderPendingLimit"`
+	MiningIntervalSec  int64  `json:"miningIntervalSec"`
+	MiningInFlight     bool   `json:"miningInFlight"`
+	MinerAddress       string `json:"minerAddress"`
+}
+
+type PendingSearchTask struct {
+	Transaction        Transaction       `json:"transaction"`
+	Request            SearchTaskRequest `json:"request"`
+	TotalBounty        string            `json:"totalBounty"`
+	AdjustedDifficulty uint64            `json:"adjustedDifficulty"`
+	PrioritySectors    []string          `json:"prioritySectors,omitempty"`
+	CreatedAt          time.Time         `json:"createdAt"`
 }
 
 func NewTxPool() *TxPool {
@@ -150,6 +174,40 @@ func (p *TxPool) Drain(limit int) []Transaction {
 	return out
 }
 
+func (p *TxPool) Requeue(transactions []Transaction) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, tx := range transactions {
+		if _, ok := p.seen[tx.Hash]; ok {
+			continue
+		}
+		key := senderNonceKey(tx.From, tx.Nonce)
+		if existingHash, ok := p.bySenderNonce[key]; ok {
+			index := p.indexOfHashLocked(existingHash)
+			if index >= 0 {
+				if !shouldReplace(p.pending[index].Value, tx.Value) {
+					continue
+				}
+				delete(p.seen, existingHash)
+				p.pending[index] = tx
+				p.seen[tx.Hash] = struct{}{}
+				p.bySenderNonce[key] = tx.Hash
+				continue
+			}
+		}
+		if p.limit > 0 && len(p.pending) >= p.limit {
+			break
+		}
+		if p.senderLimit > 0 && p.senderCounts[tx.From] >= p.senderLimit {
+			continue
+		}
+		p.pending = append(p.pending, tx)
+		p.seen[tx.Hash] = struct{}{}
+		p.bySenderNonce[key] = tx.Hash
+		p.senderCounts[tx.From]++
+	}
+}
+
 func (p *TxPool) PendingForSender(sender string) []Transaction {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -161,6 +219,19 @@ func (p *TxPool) PendingForSender(sender string) []Transaction {
 		}
 	}
 	return pending
+}
+
+func (p *TxPool) Snapshot(limit int) []Transaction {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return copyTransactions(p.pending, limit)
+}
+
+func (p *TxPool) Status() (pending, capacity, senderLimit int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.pending), p.limit, p.senderLimit
 }
 
 func (p *TaskPool) Add(task SearchTaskEnvelope) error {
@@ -203,17 +274,84 @@ func (p *TaskPool) DrainHighestValue(limit int) []SearchTaskEnvelope {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	sort.SliceStable(p.pending, func(i, j int) bool {
-		left, _ := p.pending[i].Transaction.ValueBig()
-		right, _ := p.pending[j].Transaction.ValueBig()
-		return left.Cmp(right) > 0
-	})
-
 	if limit <= 0 || limit > len(p.pending) {
 		limit = len(p.pending)
 	}
-	out := append([]SearchTaskEnvelope(nil), p.pending[:limit]...)
-	p.pending = append([]SearchTaskEnvelope(nil), p.pending[limit:]...)
+	if limit == 0 {
+		return nil
+	}
+
+	bySender := make(map[string][]SearchTaskEnvelope)
+	senders := make([]string, 0)
+	for _, task := range p.pending {
+		sender := task.Transaction.From
+		if _, ok := bySender[sender]; !ok {
+			senders = append(senders, sender)
+		}
+		bySender[sender] = append(bySender[sender], task)
+	}
+	for _, sender := range senders {
+		queue := bySender[sender]
+		sort.SliceStable(queue, func(i, j int) bool {
+			if queue[i].Transaction.Nonce == queue[j].Transaction.Nonce {
+				if queue[i].Transaction.Timestamp.Equal(queue[j].Transaction.Timestamp) {
+					return queue[i].Transaction.Hash < queue[j].Transaction.Hash
+				}
+				return queue[i].Transaction.Timestamp.Before(queue[j].Transaction.Timestamp)
+			}
+			return queue[i].Transaction.Nonce < queue[j].Transaction.Nonce
+		})
+		bySender[sender] = queue
+	}
+
+	selected := make([]SearchTaskEnvelope, 0, limit)
+	selectedHashes := make(map[string]struct{}, limit)
+	for len(selected) < limit {
+		bestSender := ""
+		bestIndex := -1
+		var bestValue *big.Int
+		for index, sender := range senders {
+			queue := bySender[sender]
+			if len(queue) == 0 {
+				continue
+			}
+			value, _ := queue[0].Transaction.ValueBig()
+			if bestIndex < 0 || value.Cmp(bestValue) > 0 {
+				bestSender = sender
+				bestIndex = index
+				bestValue = value
+				continue
+			}
+			if value.Cmp(bestValue) == 0 {
+				bestTask := bySender[bestSender][0]
+				candidate := queue[0]
+				if candidate.Transaction.Timestamp.Before(bestTask.Transaction.Timestamp) ||
+					(candidate.Transaction.Timestamp.Equal(bestTask.Transaction.Timestamp) && candidate.Transaction.Hash < bestTask.Transaction.Hash) {
+					bestSender = sender
+					bestIndex = index
+					bestValue = value
+				}
+			}
+		}
+		if bestIndex < 0 {
+			break
+		}
+		task := bySender[bestSender][0]
+		bySender[bestSender] = bySender[bestSender][1:]
+		selected = append(selected, task)
+		selectedHashes[task.Transaction.Hash] = struct{}{}
+		senders[bestIndex] = bestSender
+	}
+
+	remaining := make([]SearchTaskEnvelope, 0, len(p.pending)-len(selected))
+	for _, task := range p.pending {
+		if _, ok := selectedHashes[task.Transaction.Hash]; ok {
+			continue
+		}
+		remaining = append(remaining, task)
+	}
+	out := append([]SearchTaskEnvelope(nil), selected...)
+	p.pending = remaining
 	p.rebuildIndicesLocked()
 	return out
 }
@@ -265,6 +403,28 @@ func (p *TaskPool) PendingForSender(sender string) []SearchTaskEnvelope {
 	return pending
 }
 
+func (p *TaskPool) Snapshot(limit int) []SearchTaskEnvelope {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if limit <= 0 || limit > len(p.pending) {
+		limit = len(p.pending)
+	}
+	out := make([]SearchTaskEnvelope, 0, limit)
+	for _, task := range p.pending[:limit] {
+		cloned := task
+		cloned.Task = cloneCrawlTask(task.Task)
+		out = append(out, cloned)
+	}
+	return out
+}
+
+func (p *TaskPool) Status() (pending, capacity, senderLimit int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.pending), p.limit, p.senderLimit
+}
+
 func (e *Engine) SubmitTransaction(tx Transaction) (string, error) {
 	if e.Blockchain == nil {
 		return "", ErrInvalidBlock
@@ -280,6 +440,18 @@ func (e *Engine) SubmitTransaction(tx Transaction) (string, error) {
 	}
 	if err := e.TxPool.Add(normalized); err != nil {
 		return "", err
+	}
+	if e.Logger != nil {
+		pendingTransfers, _, _ := e.TxPool.Status()
+		e.Logger.Printf(
+			"accepted transfer tx=%s from=%s to=%s nonce=%d value=%s pendingTransfers=%d",
+			normalized.Hash,
+			normalized.From,
+			normalized.To,
+			normalized.Nonce,
+			normalized.Value,
+			pendingTransfers,
+		)
 	}
 	return normalized.Hash, nil
 }
@@ -300,6 +472,19 @@ func (e *Engine) SubmitSearchTask(tx Transaction, request SearchTaskRequest) (Se
 	if err := e.TaskPool.Add(envelope); err != nil {
 		return SearchTaskEnvelope{}, err
 	}
+	if e.Logger != nil {
+		pendingTasks, _, _ := e.TaskPool.Status()
+		e.Logger.Printf(
+			"accepted search task tx=%s sender=%s nonce=%d url=%s total=%s difficulty=%d pendingSearchTasks=%d",
+			envelope.Transaction.Hash,
+			envelope.Transaction.From,
+			envelope.Transaction.Nonce,
+			envelope.Request.URL,
+			envelope.Transaction.Value,
+			envelope.Task.AdjustedDifficulty,
+			pendingTasks,
+		)
+	}
 	return envelope, nil
 }
 
@@ -313,6 +498,67 @@ func (e *Engine) PendingNonce(address string) (uint64, error) {
 		return 0, err
 	}
 	return snapshot.Nonces[address], nil
+}
+
+func (e *Engine) MempoolStatus() MempoolStatus {
+	txPending, txCapacity, senderLimit := e.TxPool.Status()
+	taskPending, taskCapacity, taskSenderLimit := e.TaskPool.Status()
+	if taskSenderLimit > senderLimit {
+		senderLimit = taskSenderLimit
+	}
+
+	e.mu.Lock()
+	inFlight := e.inFlight
+	e.mu.Unlock()
+
+	return MempoolStatus{
+		PendingTransfers:   txPending,
+		PendingSearchTasks: taskPending,
+		TransferCapacity:   txCapacity,
+		SearchTaskCapacity: taskCapacity,
+		SenderPendingLimit: senderLimit,
+		MiningIntervalSec:  int64(e.MiningInterval / time.Second),
+		MiningInFlight:     inFlight,
+		MinerAddress:       e.MinerAddress,
+	}
+}
+
+func (e *Engine) PendingTransactions(sender string, limit int) []Transaction {
+	if e == nil || e.TxPool == nil {
+		return nil
+	}
+	cleaned := strings.TrimSpace(sender)
+	if cleaned == "" {
+		return e.TxPool.Snapshot(limit)
+	}
+	return limitTransactions(e.TxPool.PendingForSender(cleaned), limit)
+}
+
+func (e *Engine) PendingSearchTasks(sender string, limit int) []PendingSearchTask {
+	if e == nil || e.TaskPool == nil {
+		return nil
+	}
+	cleaned := strings.TrimSpace(sender)
+
+	var pending []SearchTaskEnvelope
+	if cleaned == "" {
+		pending = e.TaskPool.Snapshot(limit)
+	} else {
+		pending = limitSearchTaskEnvelopes(e.TaskPool.PendingForSender(cleaned), limit)
+	}
+
+	out := make([]PendingSearchTask, 0, len(pending))
+	for _, envelope := range pending {
+		out = append(out, PendingSearchTask{
+			Transaction:        envelope.Transaction,
+			Request:            envelope.Request,
+			TotalBounty:        envelope.Transaction.Value,
+			AdjustedDifficulty: envelope.Task.AdjustedDifficulty,
+			PrioritySectors:    append([]string(nil), envelope.Task.PrioritySectors...),
+			CreatedAt:          envelope.Task.CreatedAt,
+		})
+	}
+	return out
 }
 
 func (e *Engine) StartMining(ctx context.Context) {
@@ -360,6 +606,20 @@ func (e *Engine) tryMine(ctx context.Context) {
 	if block.Hash == "" {
 		return
 	}
+	if e.Logger != nil {
+		pendingTransfers, _, _ := e.TxPool.Status()
+		pendingTasks, _, _ := e.TaskPool.Status()
+		e.Logger.Printf(
+			"mined block number=%d hash=%s txs=%d proofs=%d miner=%s pendingTransfers=%d pendingSearchTasks=%d",
+			block.Header.Number,
+			block.Hash,
+			len(block.Body.Transactions),
+			len(block.Body.CrawlProofs),
+			block.Header.Miner,
+			pendingTransfers,
+			pendingTasks,
+		)
+	}
 	if e.PublishBlock != nil {
 		if err := e.PublishBlock(ctx, block); err != nil {
 			e.Logger.Printf("block publish failed: %v", err)
@@ -377,9 +637,19 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 	if len(transactions) == 0 && len(taskEnvelopes) == 0 {
 		return Block{}, nil
 	}
+	if e.Logger != nil {
+		e.Logger.Printf(
+			"mining tick: drained transfers=%d searchTasks=%d",
+			len(transactions),
+			len(taskEnvelopes),
+		)
+	}
+	e.setInFlightWork(transactions, taskEnvelopes)
+	defer e.clearInFlightWork()
 
 	crawlProofs := make([]CrawlProof, 0, len(taskEnvelopes))
 	taskTransactions := make([]Transaction, 0, len(taskEnvelopes))
+	minedTaskEnvelopes := make([]SearchTaskEnvelope, 0, len(taskEnvelopes))
 	failed := make([]SearchTaskEnvelope, 0)
 
 	for _, envelope := range taskEnvelopes {
@@ -387,6 +657,15 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 		result, err := e.Miner.Mine(mineCtx, envelope.Task)
 		cancel()
 		if err != nil {
+			if e.Logger != nil {
+				e.Logger.Printf(
+					"mining task failed tx=%s nonce=%d url=%s err=%v",
+					envelope.Transaction.Hash,
+					envelope.Transaction.Nonce,
+					envelope.Request.URL,
+					err,
+				)
+			}
 			failed = append(failed, envelope)
 			continue
 		}
@@ -408,18 +687,32 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 			CreatedAt:    result.CompletedAt,
 		})
 		taskTransactions = append(taskTransactions, envelope.Transaction)
+		minedTaskEnvelopes = append(minedTaskEnvelopes, envelope)
 	}
 
 	if len(failed) > 0 {
 		e.TaskPool.Requeue(failed)
+		if e.Logger != nil {
+			e.Logger.Printf("mining tick: requeued failed search tasks=%d", len(failed))
+		}
 	}
+	e.setInFlightWork(transactions, minedTaskEnvelopes)
 
 	blockTransactions := append(transactions, taskTransactions...)
 	if len(blockTransactions) == 0 && len(crawlProofs) == 0 {
+		if e.Logger != nil {
+			e.Logger.Printf("mining tick: no block produced after processing drained work")
+		}
 		return Block{}, nil
 	}
 
-	return e.Blockchain.MineBlock(e.MinerAddress, blockTransactions, crawlProofs)
+	block, err := e.Blockchain.MineBlock(e.MinerAddress, blockTransactions, crawlProofs)
+	if err != nil {
+		e.TxPool.Requeue(transactions)
+		e.TaskPool.Requeue(taskEnvelopes)
+		return Block{}, err
+	}
+	return block, nil
 }
 
 func (e *Engine) validatePendingTransaction(tx Transaction) error {
@@ -437,7 +730,11 @@ func (e *Engine) pendingStateForSender(sender string) (*StateSnapshot, error) {
 	}
 
 	snapshot, _ := e.Blockchain.Snapshot()
-	pending, err := mergeSenderPendingTransactions(e.TxPool.PendingForSender(sender), e.TaskPool.PendingForSender(sender))
+	inFlightTransfers, inFlightTasks := e.inFlightWorkForSender(sender)
+	pending, err := mergeSenderPendingTransactions(
+		append(e.TxPool.PendingForSender(sender), inFlightTransfers...),
+		append(e.TaskPool.PendingForSender(sender), inFlightTasks...),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -458,6 +755,21 @@ func mergeSenderPendingTransactions(transfers []Transaction, tasks []SearchTaskE
 		merged = append(merged, task.Transaction)
 	}
 
+	bySenderNonce := make(map[string]string, len(merged))
+	deduped := make([]Transaction, 0, len(merged))
+	for _, tx := range merged {
+		key := senderNonceKey(tx.From, tx.Nonce)
+		if existingHash, ok := bySenderNonce[key]; ok {
+			if existingHash == tx.Hash {
+				continue
+			}
+			return nil, ErrPendingNonceConflict
+		}
+		bySenderNonce[key] = tx.Hash
+		deduped = append(deduped, tx)
+	}
+	merged = deduped
+
 	sort.SliceStable(merged, func(i, j int) bool {
 		if merged[i].Nonce == merged[j].Nonce {
 			if merged[i].Timestamp.Equal(merged[j].Timestamp) {
@@ -474,6 +786,43 @@ func mergeSenderPendingTransactions(transfers []Transaction, tasks []SearchTaskE
 		}
 	}
 	return merged, nil
+}
+
+func (e *Engine) setInFlightWork(transactions []Transaction, tasks []SearchTaskEnvelope) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.inFlightTransfers = copyTransactions(transactions, 0)
+	e.inFlightTasks = limitSearchTaskEnvelopes(tasks, 0)
+}
+
+func (e *Engine) clearInFlightWork() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.inFlightTransfers = nil
+	e.inFlightTasks = nil
+}
+
+func (e *Engine) inFlightWorkForSender(sender string) ([]Transaction, []SearchTaskEnvelope) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	transfers := make([]Transaction, 0)
+	for _, tx := range e.inFlightTransfers {
+		if tx.From == sender {
+			transfers = append(transfers, tx)
+		}
+	}
+
+	tasks := make([]SearchTaskEnvelope, 0)
+	for _, task := range e.inFlightTasks {
+		if task.Transaction.From != sender {
+			continue
+		}
+		cloned := task
+		cloned.Task = cloneCrawlTask(task.Task)
+		tasks = append(tasks, cloned)
+	}
+	return transfers, tasks
 }
 
 func (p *TxPool) indexOfHashLocked(hash string) int {
@@ -518,6 +867,45 @@ func (p *TaskPool) rebuildIndicesLocked() {
 
 func senderNonceKey(sender string, nonce uint64) string {
 	return sender + "#" + strconv.FormatUint(nonce, 10)
+}
+
+func copyTransactions(items []Transaction, limit int) []Transaction {
+	if limit <= 0 || limit > len(items) {
+		limit = len(items)
+	}
+	out := make([]Transaction, 0, limit)
+	for _, tx := range items[:limit] {
+		out = append(out, tx)
+	}
+	return out
+}
+
+func limitTransactions(items []Transaction, limit int) []Transaction {
+	return copyTransactions(items, limit)
+}
+
+func limitSearchTaskEnvelopes(items []SearchTaskEnvelope, limit int) []SearchTaskEnvelope {
+	if limit <= 0 || limit > len(items) {
+		limit = len(items)
+	}
+	out := make([]SearchTaskEnvelope, 0, limit)
+	for _, task := range items[:limit] {
+		cloned := task
+		cloned.Task = cloneCrawlTask(task.Task)
+		out = append(out, cloned)
+	}
+	return out
+}
+
+func cloneCrawlTask(task consensus.CrawlTask) consensus.CrawlTask {
+	cloned := task
+	cloned.SeedURLs = append([]string(nil), task.SeedURLs...)
+	cloned.PrioritySectors = append([]string(nil), task.PrioritySectors...)
+	cloned.BaseBounty = cloneBigInt(task.BaseBounty)
+	cloned.TotalBounty = cloneBigInt(task.TotalBounty)
+	cloned.ArchitectFee = cloneBigInt(task.ArchitectFee)
+	cloned.MinerReward = cloneBigInt(task.MinerReward)
+	return cloned
 }
 
 func shouldReplace(currentValue, nextValue string) bool {

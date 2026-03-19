@@ -509,7 +509,7 @@ https://mit.edu
 Run the seeder against the local node:
 
 ```bash
-ARCHITECT_KEY=<hex-or-base64-ed25519-key> \
+SEED_KEY=<hex-or-base64-ed25519-key> \
 make seed-urls \
   URLS_FILE=./urls.txt \
   SEED_QUERY="initial web seed" \

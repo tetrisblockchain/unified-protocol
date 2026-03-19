@@ -251,6 +251,119 @@ func TestRPCServerGetTransactionCountReportsLatestAndPending(t *testing.T) {
 	}
 }
 
+func TestRPCServerMempoolEndpoints(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey returned error: %v", err)
+	}
+	sender, err := types.NewAddressFromPubKey(publicKey)
+	if err != nil {
+		t.Fatalf("NewAddressFromPubKey returned error: %v", err)
+	}
+
+	recipientKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey recipient returned error: %v", err)
+	}
+	recipient, err := types.NewAddressFromPubKey(recipientKey)
+	if err != nil {
+		t.Fatalf("NewAddressFromPubKey recipient returned error: %v", err)
+	}
+
+	chain, err := core.OpenBlockchain(core.BlockchainConfig{
+		DataDir: filepath.Join(t.TempDir(), "chain"),
+		GenesisBalances: map[string]*big.Int{
+			sender.String(): big.NewInt(1_000_000),
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenBlockchain returned error: %v", err)
+	}
+	defer chain.Close()
+
+	engine := core.NewEngine(chain, consensus.Miner{PriorityRegistry: consensus.NewPriorityRegistry()}, "UFI_TEST_MINER", nil)
+
+	transfer := core.Transaction{
+		Type:  core.TxTypeTransfer,
+		From:  sender.String(),
+		To:    recipient.String(),
+		Value: "25000",
+		Nonce: 0,
+	}
+	if err := transfer.Sign(privateKey); err != nil {
+		t.Fatalf("Sign transfer returned error: %v", err)
+	}
+	if _, err := engine.SubmitTransaction(transfer); err != nil {
+		t.Fatalf("SubmitTransaction returned error: %v", err)
+	}
+
+	request := core.SearchTaskRequest{
+		Query:           "initial web seed",
+		URL:             "https://example.com",
+		BaseBounty:      "100",
+		Difficulty:      1,
+		DataVolumeBytes: 10,
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+	totalValue, err := consensus.QuoteBounty(big.NewInt(100), 1, 10)
+	if err != nil {
+		t.Fatalf("QuoteBounty returned error: %v", err)
+	}
+	searchTx := core.Transaction{
+		Type:  core.TxTypeSearchTask,
+		From:  sender.String(),
+		Value: totalValue.String(),
+		Nonce: 1,
+		Data:  payload,
+	}
+	if err := searchTx.Sign(privateKey); err != nil {
+		t.Fatalf("Sign search task returned error: %v", err)
+	}
+	if _, err := engine.SubmitSearchTask(searchTx, request); err != nil {
+		t.Fatalf("SubmitSearchTask returned error: %v", err)
+	}
+
+	server := NewRPCServer(chain, engine, nil)
+
+	statusPayload := `{"jsonrpc":"2.0","id":30,"method":"ufi_getMempoolStatus","params":{}}`
+	statusRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(statusPayload))
+	statusResponse := httptest.NewRecorder()
+	server.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_getMempoolStatus status = %d, want %d", statusResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(statusResponse.Body.String(), `"pendingTransfers":1`) || !strings.Contains(statusResponse.Body.String(), `"pendingSearchTasks":1`) {
+		t.Fatalf("ufi_getMempoolStatus body = %s, want both pending counts", statusResponse.Body.String())
+	}
+
+	txPayload := `{"jsonrpc":"2.0","id":31,"method":"ufi_getPendingTransactions","params":{"address":"` + sender.String() + `","limit":5}}`
+	txRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(txPayload))
+	txResponse := httptest.NewRecorder()
+	server.ServeHTTP(txResponse, txRequest)
+	if txResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_getPendingTransactions status = %d, want %d", txResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(txResponse.Body.String(), transfer.Hash) || strings.Contains(txResponse.Body.String(), searchTx.Hash) {
+		t.Fatalf("ufi_getPendingTransactions body = %s, want transfer only", txResponse.Body.String())
+	}
+
+	taskPayload := `{"jsonrpc":"2.0","id":32,"method":"ufi_getPendingSearchTasks","params":{"address":"` + sender.String() + `","limit":5}}`
+	taskRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(taskPayload))
+	taskResponse := httptest.NewRecorder()
+	server.ServeHTTP(taskResponse, taskRequest)
+	if taskResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_getPendingSearchTasks status = %d, want %d", taskResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(taskResponse.Body.String(), searchTx.Hash) || !strings.Contains(taskResponse.Body.String(), `"url":"https://example.com"`) {
+		t.Fatalf("ufi_getPendingSearchTasks body = %s, want queued search task", taskResponse.Body.String())
+	}
+}
+
 func TestRPCServerGetCodeAndContracts(t *testing.T) {
 	t.Parallel()
 
@@ -550,7 +663,18 @@ func TestRPCServerActivityEndpoints(t *testing.T) {
 		t.Fatalf("ufi_getCrawlProof body = %s, want URL and block number", proofResponse.Body.String())
 	}
 
-	blockPayload := `{"jsonrpc":"2.0","id":24,"method":"ufi_getBlockByHash","params":{"hash":"` + chain.LatestBlock().Hash + `"}}`
+	searchPayload := `{"jsonrpc":"2.0","id":24,"method":"ufi_searchIndex","params":{"term":"distributed","url":"example","limit":5}}`
+	searchRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(searchPayload))
+	searchResponse := httptest.NewRecorder()
+	server.ServeHTTP(searchResponse, searchRequest)
+	if searchResponse.Code != http.StatusOK {
+		t.Fatalf("ufi_searchIndex status = %d, want %d", searchResponse.Code, http.StatusOK)
+	}
+	if !strings.Contains(searchResponse.Body.String(), `"total":1`) || !strings.Contains(searchResponse.Body.String(), `"url":"https://example.edu"`) {
+		t.Fatalf("ufi_searchIndex body = %s, want ranked search hit", searchResponse.Body.String())
+	}
+
+	blockPayload := `{"jsonrpc":"2.0","id":25,"method":"ufi_getBlockByHash","params":{"hash":"` + chain.LatestBlock().Hash + `"}}`
 	blockRequest := httptest.NewRequest(http.MethodPost, "/rpc", strings.NewReader(blockPayload))
 	blockResponse := httptest.NewRecorder()
 	server.ServeHTTP(blockResponse, blockRequest)

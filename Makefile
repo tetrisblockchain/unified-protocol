@@ -24,6 +24,7 @@ OPERATOR_VOTING_POWER ?= 5000
 CIRCULATING_SUPPLY ?= 1000000
 
 ARCHITECT_KEY ?=
+SEED_KEY ?=
 GENESIS_URL ?=
 GENESIS_QUERY ?=
 URLS_FILE ?=
@@ -202,9 +203,9 @@ bootstrap-architect:
 	./scripts/bootstrap_architect.sh
 
 seed-urls:
-	test -n "$(ARCHITECT_KEY)" || (echo "ARCHITECT_KEY is required" && exit 1)
+	test -n "$(SEED_KEY)$(ARCHITECT_KEY)" || (echo "SEED_KEY or ARCHITECT_KEY is required" && exit 1)
 	test -n "$(URLS_FILE)" || (echo "URLS_FILE is required" && exit 1)
-	UFI_ARCHITECT_KEY="$(ARCHITECT_KEY)" \
+	UFI_SEED_KEY="$(if $(SEED_KEY),$(SEED_KEY),$(ARCHITECT_KEY))" \
 	UFI_RPC_URL="http://$(RPCHOST):$(RPCPORT)" \
 	$(GO) run ./scripts/seed_urls \
 		--file "$(URLS_FILE)" \

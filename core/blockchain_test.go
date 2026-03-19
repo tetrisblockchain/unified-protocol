@@ -381,6 +381,17 @@ func TestMineBlockStoresSearchProofState(t *testing.T) {
 	if got := chain.GetBalance(constants.GenesisArchitectAddress).String(); got != architectFee.String() {
 		t.Fatalf("architect balance = %s, want %s", got, architectFee.String())
 	}
+
+	searchResults := chain.SearchIndex("distributed", "example", 10)
+	if searchResults.MentionFrequency == 0 {
+		t.Fatalf("expected distributed mention frequency in ranked search")
+	}
+	if searchResults.Total == 0 || len(searchResults.Hits) == 0 {
+		t.Fatalf("expected ranked search hits")
+	}
+	if searchResults.Hits[0].Document.URL != request.URL {
+		t.Fatalf("top ranked URL = %s, want %s", searchResults.Hits[0].Document.URL, request.URL)
+	}
 }
 
 func TestBlockchainPersistsNetworkConfigAndRejectsArchitectMismatch(t *testing.T) {

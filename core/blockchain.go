@@ -124,6 +124,20 @@ type SearchQueryResult struct {
 	MatchingURLs     []string      `json:"matchingUrls,omitempty"`
 }
 
+type SearchHit struct {
+	Document  SearchRecord `json:"document"`
+	TermCount uint64       `json:"termCount"`
+	Score     uint64       `json:"score"`
+}
+
+type SearchResults struct {
+	Term             string      `json:"term"`
+	URLFilter        string      `json:"urlFilter,omitempty"`
+	MentionFrequency uint64      `json:"mentionFrequency"`
+	Total            uint64      `json:"total"`
+	Hits             []SearchHit `json:"hits,omitempty"`
+}
+
 type NameRecord struct {
 	Name         string    `json:"name"`
 	Owner        string    `json:"owner"`
@@ -484,6 +498,56 @@ func (bc *Blockchain) GetSearchData(url, term string) SearchQueryResult {
 	return result
 }
 
+func (bc *Blockchain) SearchIndex(term, urlFilter string, limit uint64) SearchResults {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	result := SearchResults{
+		Term:      strings.TrimSpace(term),
+		URLFilter: strings.TrimSpace(urlFilter),
+	}
+	normalizedTerm := normalizeTerm(term)
+	if normalizedTerm == "" {
+		return result
+	}
+
+	result.MentionFrequency = bc.state.MentionCounts[normalizedTerm]
+	filter := strings.ToLower(result.URLFilter)
+	for url, record := range bc.state.SearchIndex {
+		if filter != "" && !strings.Contains(strings.ToLower(url), filter) {
+			continue
+		}
+		termCount := record.TermCounts[normalizedTerm]
+		if termCount == 0 {
+			continue
+		}
+		copyRecord := record
+		copyRecord.TermCounts = cloneUint64Map(record.TermCounts)
+		result.Hits = append(result.Hits, SearchHit{
+			Document:  copyRecord,
+			TermCount: termCount,
+			Score:     termCount,
+		})
+	}
+
+	sort.Slice(result.Hits, func(i, j int) bool {
+		if result.Hits[i].Score != result.Hits[j].Score {
+			return result.Hits[i].Score > result.Hits[j].Score
+		}
+		if !result.Hits[i].Document.IndexedAt.Equal(result.Hits[j].Document.IndexedAt) {
+			return result.Hits[i].Document.IndexedAt.After(result.Hits[j].Document.IndexedAt)
+		}
+		return result.Hits[i].Document.URL < result.Hits[j].Document.URL
+	})
+
+	result.Total = uint64(len(result.Hits))
+	maxItems := normalizeSearchResultLimit(limit)
+	if len(result.Hits) > maxItems {
+		result.Hits = append([]SearchHit(nil), result.Hits[:maxItems]...)
+	}
+	return result
+}
+
 func (bc *Blockchain) PrecompileMentionFrequency(term string) ([]byte, error) {
 	input, err := EncodeMentionFrequencyCall(term)
 	if err != nil {
@@ -829,6 +893,17 @@ func normalizeActivityLimit(limit uint64) int {
 		return 12
 	case limit > 64:
 		return 64
+	default:
+		return int(limit)
+	}
+}
+
+func normalizeSearchResultLimit(limit uint64) int {
+	switch {
+	case limit == 0:
+		return 10
+	case limit > 50:
+		return 50
 	default:
 		return int(limit)
 	}

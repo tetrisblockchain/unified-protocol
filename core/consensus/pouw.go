@@ -29,6 +29,7 @@ const (
 	SimHashSimilarityThreshold = 0.95
 	ValidatorSampleSize        = 3
 	ValidatorQuorum            = 2
+	DefaultCrawlerUserAgent    = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
 
 var (
@@ -248,9 +249,11 @@ func (c CollyCrawler) Index(ctx context.Context, task CrawlTask, targetURL strin
 		IndexedAt: time.Now().UTC(),
 	}
 
-	collector := colly.NewCollector()
-	if c.UserAgent != "" {
+	collector := colly.NewCollector(colly.AllowURLRevisit())
+	if strings.TrimSpace(c.UserAgent) != "" {
 		collector.UserAgent = c.UserAgent
+	} else {
+		collector.UserAgent = DefaultCrawlerUserAgent
 	}
 	if len(c.AllowedDomains) > 0 {
 		collector.AllowedDomains = append([]string(nil), c.AllowedDomains...)

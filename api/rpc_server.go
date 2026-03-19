@@ -90,6 +90,12 @@ type getSearchDataParams struct {
 	Term string `json:"term"`
 }
 
+type searchIndexParams struct {
+	Term  string `json:"term"`
+	URL   string `json:"url,omitempty"`
+	Limit uint64 `json:"limit,omitempty"`
+}
+
 type precompileParams struct {
 	Term string `json:"term"`
 }
@@ -127,6 +133,11 @@ type getTransactionByHashParams struct {
 type getCrawlProofParams struct {
 	TaskTxHash string `json:"taskTxHash,omitempty"`
 	TaskID     string `json:"taskId,omitempty"`
+}
+
+type getPendingPoolParams struct {
+	Address string `json:"address,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
 }
 
 type callParams struct {
@@ -373,6 +384,29 @@ func (s *RPCServer) handle(r rpcRequest) (any, *rpcError) {
 			return nil, rpcFailure(err)
 		}
 		return proof, nil
+	case "ufi_getMempoolStatus":
+		if s.Engine == nil {
+			return nil, rpcFailure(errors.New("mempool is unavailable"))
+		}
+		return s.Engine.MempoolStatus(), nil
+	case "ufi_getPendingTransactions":
+		if s.Engine == nil {
+			return nil, rpcFailure(errors.New("mempool is unavailable"))
+		}
+		var params getPendingPoolParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.Engine.PendingTransactions(params.Address, params.Limit), nil
+	case "ufi_getPendingSearchTasks":
+		if s.Engine == nil {
+			return nil, rpcFailure(errors.New("mempool is unavailable"))
+		}
+		var params getPendingPoolParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.Engine.PendingSearchTasks(params.Address, params.Limit), nil
 	case "ufi_submitSearchTask":
 		var params submitSearchTaskParams
 		if err := decodeParams(r.Params, &params); err != nil {
@@ -396,6 +430,12 @@ func (s *RPCServer) handle(r rpcRequest) (any, *rpcError) {
 			return nil, invalidParams(err)
 		}
 		return s.Blockchain.GetSearchData(params.URL, params.Term), nil
+	case "ufi_searchIndex":
+		var params searchIndexParams
+		if err := decodeParams(r.Params, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.Blockchain.SearchIndex(params.Term, params.URL, params.Limit), nil
 	case "ufi_getNamePrice":
 		var params getNamePriceParams
 		if err := decodeParams(r.Params, &params); err != nil {
