@@ -40,7 +40,7 @@ Health and latest-block checks:
 ```bash
 make smoke-health
 make smoke-rpc
-curl -s http://127.0.0.1:8545/readyz
+curl -s http://127.0.0.1:3337/readyz
 ```
 
 ## Multi-Node Bootstrap
@@ -98,6 +98,16 @@ make generate-network-config \
 
 Keep that file as the pinned launch manifest and copy it unchanged to every host. A starter example lives at [unified-network.mainnet.example.json](/Users/efrainvera/Documents/UNIFIED/config/unified-network.mainnet.example.json), but the real launch file should be generated once and then frozen.
 
+When you are ready to hand off the mainnet launch package, build a versioned release bundle:
+
+```bash
+make package-mainnet-release \
+  RELEASE_NETWORK_CONFIG=./config/unified-network.mainnet.json \
+  RELEASE_TARGETS='linux/amd64 linux/arm64 darwin/arm64'
+```
+
+This produces runtime archives, an ops bundle, website bundle, desktop bundle, `SHA256SUMS`, `release-manifest.json`, and a top-level `unified-mainnet-launch-<version>.tar.gz` under `./build/release/<version>/`.
+
 Generate each node operator identity separately and store the seed offline:
 
 ```bash
@@ -121,7 +131,7 @@ For a Linux seed node, apply a minimal `ufw` policy before starting the service:
 sudo make configure-firewall-linux \
   P2P_PORT=4001 \
   SSH_PORT=22 \
-  RPCPORT=8545 \
+  RPCPORT=3337 \
   ALLOW_RPC_PUBLIC=0
 ```
 
@@ -305,7 +315,7 @@ make verify-network-config NETWORK_CONFIG=./config/unified-network.mainnet.json
 4. On the first Linux seed node, apply the firewall policy:
 
 ```bash
-sudo make configure-firewall-linux P2P_PORT=4001 SSH_PORT=22 RPCPORT=8545
+sudo make configure-firewall-linux P2P_PORT=4001 SSH_PORT=22 RPCPORT=3337
 ```
 
 5. Install the node service on the first seed node with `UNIFIED_BOOTNODES` empty.
@@ -313,9 +323,9 @@ sudo make configure-firewall-linux P2P_PORT=4001 SSH_PORT=22 RPCPORT=8545
 7. Start the node and verify:
 
 ```bash
-curl -s http://127.0.0.1:8545/healthz
-curl -s http://127.0.0.1:8545/readyz
-curl -s http://127.0.0.1:8545/p2p/peers
+curl -s http://127.0.0.1:3337/healthz
+curl -s http://127.0.0.1:3337/readyz
+curl -s http://127.0.0.1:3337/p2p/peers
 ```
 
 8. Capture the first node's full libp2p multiaddr from the logs and freeze it as the initial bootnode:
@@ -329,8 +339,8 @@ journalctl -u unified-seed-node -n 50 --no-pager | grep 'p2p listen address:'
 11. Verify all nodes agree on chain ID, shared manifest, and peer visibility:
 
 ```bash
-curl -s http://127.0.0.1:8545/p2p/peers
-curl -s -X POST http://127.0.0.1:8545/rpc \
+curl -s http://127.0.0.1:3337/p2p/peers
+curl -s -X POST http://127.0.0.1:3337/rpc \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"ufi_getNetworkConfig","params":{}}'
 ```
@@ -340,7 +350,7 @@ curl -s -X POST http://127.0.0.1:8545/rpc \
 ```bash
 make verify-network-config \
   NETWORK_CONFIG=./config/unified-network.mainnet.json \
-  VERIFY_RPC_URL=http://127.0.0.1:8545
+  VERIFY_RPC_URL=http://127.0.0.1:3337
 ```
 
 13. Only after the network is stable, run the genesis bootstrap on the designated architect node.
@@ -393,7 +403,7 @@ In a second shell:
 
 ```bash
 make genesis \
-  RPCPORT=8545 \
+  RPCPORT=3337 \
   ARCHITECT_KEY=<hex-or-base64-ed25519-key>
 ```
 
@@ -401,7 +411,7 @@ Optional seed overrides:
 
 ```bash
 make genesis \
-  RPCPORT=8545 \
+  RPCPORT=3337 \
   ARCHITECT_KEY=<hex-or-base64-ed25519-key> \
   GENESIS_URL=https://unified.network/genesis \
   GENESIS_QUERY="UniFied genesis seed"
@@ -441,7 +451,7 @@ make solc-uns
 
 ## Desktop Wallet / Explorer
 
-The Electron wallet/explorer lives under `web3/desktop` and expects a running UniFied node on `http://127.0.0.1:8545` unless you override the RPC URL in the app.
+The Electron wallet/explorer lives under `web3/desktop` and expects a running UniFied node on `http://127.0.0.1:3337` unless you override the RPC URL in the app.
 
 Start the desktop app in development mode:
 
@@ -471,7 +481,7 @@ The node exposes the protocol system contracts as first-class introspection targ
 List them:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8545/rpc \
+curl -s -X POST http://127.0.0.1:3337/rpc \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"ufi_listContracts","params":{}}'
 ```
@@ -479,7 +489,7 @@ curl -s -X POST http://127.0.0.1:8545/rpc \
 Fetch one contract record:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8545/rpc \
+curl -s -X POST http://127.0.0.1:3337/rpc \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"ufi_getContract","params":{"address":"0x102"}}'
 ```
@@ -487,7 +497,7 @@ curl -s -X POST http://127.0.0.1:8545/rpc \
 Inspect descriptor bytecode:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8545/rpc \
+curl -s -X POST http://127.0.0.1:3337/rpc \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":3,"method":"eth_getCode","params":["0x102","latest"]}'
 ```
@@ -515,12 +525,14 @@ make seed-urls \
   SEED_QUERY="initial web seed" \
   SEED_BASE_BOUNTY=1.0 \
   SEED_DIFFICULTY=8 \
-  SEED_DATA_VOLUME_BYTES=1024
+  SEED_DATA_VOLUME_BYTES=1024 \
+  SEED_PREFLIGHT=true
 ```
 
 Operational notes:
 
 - The sender account must have enough UFD for the full quoted bounty set.
+- The seeder preflights URLs by default and skips obvious failures like persistent `403` sites before quoting and submission.
 - The script refuses to start if the sender already has pending transactions.
 - One sender can keep at most `32` tasks in flight with the current node limits, so large seeds are submitted in waves while the miner drains the queue.
 
@@ -535,7 +547,7 @@ make check-node
 Peer reputation view:
 
 ```bash
-curl -s http://127.0.0.1:8545/p2p/peers
+curl -s http://127.0.0.1:3337/p2p/peers
 ```
 
 Datadir backup:

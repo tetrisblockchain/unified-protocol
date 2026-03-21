@@ -432,7 +432,7 @@ func (s *Service) handleQuote(writer http.ResponseWriter, request *http.Request)
 func normalizeConfig(config Config) (Config, error) {
 	normalized := config
 	if strings.TrimSpace(normalized.HTTPAddress) == "" {
-		normalized.HTTPAddress = ":8545"
+		normalized.HTTPAddress = ":3337"
 	}
 	if normalized.CirculatingSupply == nil || normalized.CirculatingSupply.Sign() <= 0 {
 		normalized.CirculatingSupply = big.NewInt(1_000_000)

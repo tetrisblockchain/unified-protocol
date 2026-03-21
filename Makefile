@@ -9,7 +9,7 @@ DESKTOP_DIR := web3/desktop
 
 DATADIR ?= ./data/local
 RPCHOST ?= 127.0.0.1
-RPCPORT ?= 8545
+RPCPORT ?= 3337
 P2P_LISTEN ?= /ip4/0.0.0.0/tcp/0
 P2P_PORT ?= 4001
 BOOTNODES ?=
@@ -33,6 +33,8 @@ SEED_BASE_BOUNTY ?= 1.0
 SEED_DIFFICULTY ?= 8
 SEED_DATA_VOLUME_BYTES ?= 1024
 SEED_BATCH_SIZE ?= 32
+SEED_PREFLIGHT ?= true
+SEED_PREFLIGHT_TIMEOUT ?= 12s
 BACKUP_OUTPUT ?=
 BACKUP_ARCHIVE ?=
 RESTORE_TARGET ?=
@@ -47,8 +49,16 @@ ALLOW_RPC_PUBLIC ?= 0
 PLATFORM ?= linux
 ROLE ?= bootstrap
 VERIFY_RPC_URL ?=
+RELEASE_VERSION ?= mainnet-$(shell date -u +%Y%m%d-%H%M%S)
+RELEASE_OUT ?= ./build/release/$(RELEASE_VERSION)
+RELEASE_NETWORK_CONFIG ?= ./config/unified-network.mainnet.json
+RELEASE_TARGETS ?= linux/amd64 linux/arm64 darwin/arm64
+RELEASE_INCLUDE_DESKTOP ?= 1
+RELEASE_INCLUDE_DESKTOP_NODE_MODULES ?= 0
+RELEASE_INCLUDE_WEBSITE ?= 1
+RELEASE_INCLUDE_CONTRACTS ?= 1
 
-.PHONY: setup tidy fmt test build build-node build-cli desktop-install desktop-dev desktop-build desktop-start install-go-linux install-seed-node install-seed-node-macos install-backup-rotation configure-firewall-linux generate-operator generate-network-config verify-network-config print-cutover-commands run-node run-mine genesis bootstrap-architect seed-urls check-node backup-datadir restore-datadir rollout-node solc-uns smoke-health smoke-rpc clean
+.PHONY: setup tidy fmt test build build-node build-cli desktop-install desktop-dev desktop-build desktop-start install-go-linux install-seed-node install-seed-node-macos install-backup-rotation configure-firewall-linux generate-operator generate-network-config verify-network-config print-cutover-commands package-mainnet-release run-node run-mine genesis bootstrap-architect seed-urls check-node backup-datadir restore-datadir rollout-node solc-uns smoke-health smoke-rpc clean
 
 setup:
 	./setup.sh
@@ -143,6 +153,20 @@ print-cutover-commands:
 		--backup-dir "$(BACKUP_DIR)" \
 		--backup-retention "$(BACKUP_RETENTION)"
 
+package-mainnet-release:
+	RELEASE_VERSION="$(RELEASE_VERSION)" \
+	RELEASE_OUT="$(RELEASE_OUT)" \
+	RELEASE_NETWORK_CONFIG="$(RELEASE_NETWORK_CONFIG)" \
+	RELEASE_TARGETS="$(RELEASE_TARGETS)" \
+	RELEASE_INCLUDE_DESKTOP="$(RELEASE_INCLUDE_DESKTOP)" \
+	RELEASE_INCLUDE_DESKTOP_NODE_MODULES="$(RELEASE_INCLUDE_DESKTOP_NODE_MODULES)" \
+	RELEASE_INCLUDE_WEBSITE="$(RELEASE_INCLUDE_WEBSITE)" \
+	RELEASE_INCLUDE_CONTRACTS="$(RELEASE_INCLUDE_CONTRACTS)" \
+	GO="$(GO)" \
+	NPM="$(NPM)" \
+	SOLC="$(SOLC)" \
+	./scripts/release/package_mainnet_release.sh
+
 run-node:
 	$(GO) run ./cmd/unified-node \
 		--network-config "$(NETWORK_CONFIG)" \
@@ -206,14 +230,16 @@ seed-urls:
 	test -n "$(SEED_KEY)$(ARCHITECT_KEY)" || (echo "SEED_KEY or ARCHITECT_KEY is required" && exit 1)
 	test -n "$(URLS_FILE)" || (echo "URLS_FILE is required" && exit 1)
 	UFI_SEED_KEY="$(if $(SEED_KEY),$(SEED_KEY),$(ARCHITECT_KEY))" \
-	UFI_RPC_URL="http://$(RPCHOST):$(RPCPORT)" \
+	UFI_RPC_URL="http://$(RPCHOST):$(RPCPORT)/rpc" \
 	$(GO) run ./scripts/seed_urls \
 		--file "$(URLS_FILE)" \
 		--query "$(SEED_QUERY)" \
 		--base-bounty "$(SEED_BASE_BOUNTY)" \
 		--difficulty "$(SEED_DIFFICULTY)" \
 		--data-volume-bytes "$(SEED_DATA_VOLUME_BYTES)" \
-		--batch-size "$(SEED_BATCH_SIZE)"
+		--batch-size "$(SEED_BATCH_SIZE)" \
+		--url-preflight "$(SEED_PREFLIGHT)" \
+		--url-preflight-timeout "$(SEED_PREFLIGHT_TIMEOUT)"
 
 check-node:
 	UFI_RPC_URL="http://$(RPCHOST):$(RPCPORT)" \

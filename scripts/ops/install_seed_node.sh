@@ -10,6 +10,7 @@ SYSTEM_USER="${UNIFIED_SYSTEM_USER:-unified}"
 SYSTEM_GROUP="${UNIFIED_SYSTEM_GROUP:-unified}"
 INSTALL_PREFIX="${UNIFIED_INSTALL_PREFIX:-/usr/local/bin}"
 BINARY_PATH="${UNIFIED_BINARY_PATH:-$INSTALL_PREFIX/unified-node}"
+BINARY_SOURCE="${UNIFIED_BINARY_SOURCE:-}"
 CONFIG_DIR="${UNIFIED_CONFIG_DIR:-/etc/unified}"
 ENV_FILE="${UNIFIED_ENV_FILE:-$CONFIG_DIR/${SERVICE_NAME}.env}"
 NETWORK_CONFIG_PATH="${UNIFIED_NETWORK_CONFIG:-$CONFIG_DIR/unified-network.json}"
@@ -23,7 +24,7 @@ UNIFIED_MINE_VALUE="${UNIFIED_MINE:-true}"
 UNIFIED_NETWORK_NAME_VALUE="${UNIFIED_NETWORK_NAME:-unified-mainnet}"
 UNIFIED_CHAIN_ID_VALUE="${UNIFIED_CHAIN_ID:-333}"
 UNIFIED_RPC_HOST_VALUE="${UNIFIED_RPC_HOST:-127.0.0.1}"
-UNIFIED_RPC_PORT_VALUE="${UNIFIED_RPC_PORT:-8545}"
+UNIFIED_RPC_PORT_VALUE="${UNIFIED_RPC_PORT:-3337}"
 UNIFIED_RPC_CORS_ORIGINS_VALUE="${UNIFIED_RPC_CORS_ORIGINS:-}"
 UNIFIED_P2P_LISTEN_VALUE="${UNIFIED_P2P_LISTEN:-/ip4/0.0.0.0/tcp/4001}"
 UNIFIED_BOOTNODES_VALUE="${UNIFIED_BOOTNODES:-}"
@@ -56,6 +57,7 @@ Relevant environment variables:
   UNIFIED_SYSTEM_GROUP
   UNIFIED_INSTALL_PREFIX
   UNIFIED_BINARY_PATH
+  UNIFIED_BINARY_SOURCE
   UNIFIED_SOURCE_ROOT
   UNIFIED_BUILD_PACKAGE
   UNIFIED_CONFIG_DIR
@@ -120,7 +122,18 @@ require_command() {
 configure_source_layout() {
 	local candidate template_base
 
-	if [[ -n "$BUILD_PACKAGE" ]]; then
+	if [[ -z "$BINARY_SOURCE" && -f "${ROOT_DIR}/bin/unified-node" ]]; then
+		BINARY_SOURCE="${ROOT_DIR}/bin/unified-node"
+	fi
+
+	if [[ -n "$BINARY_SOURCE" && ! -f "$BINARY_SOURCE" ]]; then
+		echo "Configured prebuilt binary not found: $BINARY_SOURCE" >&2
+		exit 1
+	fi
+
+	if [[ -n "$BINARY_SOURCE" ]]; then
+		BUILD_PACKAGE=""
+	elif [[ -n "$BUILD_PACKAGE" ]]; then
 		if [[ ! -d "${ROOT_DIR}/${BUILD_PACKAGE#./}" ]]; then
 			echo "Configured build package not found under ${ROOT_DIR}: ${BUILD_PACKAGE}" >&2
 			exit 1
@@ -134,12 +147,12 @@ configure_source_layout() {
 		done
 	fi
 
-	if [[ -z "$BUILD_PACKAGE" ]]; then
+	if [[ -z "$BUILD_PACKAGE" && -z "$BINARY_SOURCE" ]]; then
 		echo "Could not find a node source package under ${ROOT_DIR}." >&2
 		echo "Expected one of:" >&2
 		echo "  ${ROOT_DIR}/cmd/unified-node" >&2
 		echo "  ${ROOT_DIR}/unified-protocol/cmd/unified-node" >&2
-		echo "Set UNIFIED_SOURCE_ROOT or UNIFIED_BUILD_PACKAGE if your checkout is elsewhere." >&2
+		echo "Or provide a prebuilt binary with UNIFIED_BINARY_SOURCE or ${ROOT_DIR}/bin/unified-node." >&2
 		exit 1
 	fi
 
@@ -276,6 +289,17 @@ ensure_directories() {
 
 build_binary() {
 	local tempdir tempbin
+
+	if [[ -n "$BINARY_SOURCE" ]]; then
+		if [[ "$DRY_RUN" == "1" ]]; then
+			echo "[dry-run] install -m 0755 $BINARY_SOURCE $BINARY_PATH"
+			return 0
+		fi
+		run_cmd install -d -m 0755 "$(dirname "$BINARY_PATH")"
+		run_cmd install -m 0755 "$BINARY_SOURCE" "$BINARY_PATH"
+		return 0
+	fi
+
 	tempdir="$(mktemp -d)"
 	tempbin="$tempdir/unified-node"
 	trap 'rm -rf "$tempdir"' RETURN
@@ -436,7 +460,6 @@ if [[ "$DRY_RUN" != "1" && "${EUID}" -ne 0 ]]; then
 	exit 1
 fi
 
-require_command go
 require_command systemctl
 require_command install
 require_command sed
@@ -447,14 +470,21 @@ require_command groupadd
 require_command getent
 require_command id
 
-if ! check_go_version; then
-	echo "Go 1.25+ is required. Found $(parse_go_version)." >&2
-	exit 1
-fi
-
 configure_source_layout
 
-log "building unified-node from $ROOT_DIR using $BUILD_PACKAGE"
+if [[ -z "$BINARY_SOURCE" ]]; then
+	require_command go
+	if ! check_go_version; then
+		echo "Go 1.25+ is required. Found $(parse_go_version)." >&2
+		exit 1
+	fi
+fi
+
+if [[ -n "$BINARY_SOURCE" ]]; then
+	log "installing prebuilt unified-node from $BINARY_SOURCE"
+else
+	log "building unified-node from $ROOT_DIR using $BUILD_PACKAGE"
+fi
 build_binary
 log "ensuring system user and directories"
 ensure_group

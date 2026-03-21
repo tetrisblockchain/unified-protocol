@@ -44,7 +44,7 @@ func run() error {
 	flag.StringVar(&repoRoot, "repo-root", cwd, "repo root to reference in generated commands")
 	flag.StringVar(&configSourcePath, "config-source", "", "path to the pinned network config on the target host; defaults to the supplied --config path")
 	flag.StringVar(&bootnodesRaw, "bootnodes", "", "optional comma-separated bootnode override for joiner nodes")
-	flag.IntVar(&rpcPort, "rpc-port", 8545, "RPC port")
+	flag.IntVar(&rpcPort, "rpc-port", 3337, "RPC port")
 	flag.IntVar(&p2pPort, "p2p-port", 4001, "libp2p port")
 	flag.IntVar(&sshPort, "ssh-port", 22, "SSH port for the Linux firewall helper")
 	flag.StringVar(&backupDir, "backup-dir", "/var/backups/unified", "backup directory for Linux nodes")
@@ -99,7 +99,7 @@ func run() error {
 	case "linux":
 		printLinuxCommands(repoRoot, configSourcePath, role, operatorAddress, operatorAlias, bootnodes, rpcPort, p2pPort, sshPort, backupDir, backupRetention)
 	case "macos":
-		printMacOSCommands(repoRoot, configSourcePath, role, operatorAddress, operatorAlias, bootnodes)
+		printMacOSCommands(repoRoot, configSourcePath, role, operatorAddress, operatorAlias, bootnodes, rpcPort)
 	}
 
 	return nil
@@ -117,17 +117,17 @@ func printLinuxCommands(repoRoot, configSourcePath, role, operatorAddress, opera
 	}
 	fmt.Printf("  ./scripts/ops/install_seed_node.sh --start --overwrite-env\n")
 	fmt.Printf("sudo make install-backup-rotation DATADIR=/var/lib/unified BACKUP_DIR=%q BACKUP_RETENTION=%d\n", backupDir, backupRetention)
-	fmt.Println("curl -s http://127.0.0.1:8545/healthz")
-	fmt.Println("curl -s http://127.0.0.1:8545/readyz")
+	fmt.Printf("curl -s http://127.0.0.1:%d/healthz\n", rpcPort)
+	fmt.Printf("curl -s http://127.0.0.1:%d/readyz\n", rpcPort)
 	fmt.Printf("go run ./scripts/verify_network_config --config %q --rpc-url http://127.0.0.1:%d\n", configSourcePath, rpcPort)
 	if role == "bootstrap" {
 		fmt.Println("sudo journalctl -u unified-seed-node -n 50 --no-pager | grep 'p2p listen address:'")
 	} else {
-		fmt.Println("curl -s http://127.0.0.1:8545/p2p/peers")
+		fmt.Printf("curl -s http://127.0.0.1:%d/p2p/peers\n", rpcPort)
 	}
 }
 
-func printMacOSCommands(repoRoot, configSourcePath, role, operatorAddress, operatorAlias, bootnodes string) {
+func printMacOSCommands(repoRoot, configSourcePath, role, operatorAddress, operatorAlias, bootnodes string, rpcPort int) {
 	fmt.Printf("# %s macOS node install\n", titleCase(role))
 	fmt.Printf("cd %q\n", repoRoot)
 	fmt.Printf("sudo UNIFIED_NETWORK_CONFIG_SOURCE=%q \\\n", configSourcePath)
@@ -137,13 +137,13 @@ func printMacOSCommands(repoRoot, configSourcePath, role, operatorAddress, opera
 		fmt.Printf("  UNIFIED_BOOTNODES=%q \\\n", bootnodes)
 	}
 	fmt.Printf("  ./scripts/ops/install_seed_node_macos.sh --start --overwrite-env\n")
-	fmt.Println("curl -s http://127.0.0.1:8545/healthz")
-	fmt.Println("curl -s http://127.0.0.1:8545/readyz")
-	fmt.Printf("go run ./scripts/verify_network_config --config %q --rpc-url http://127.0.0.1:8545\n", configSourcePath)
+	fmt.Printf("curl -s http://127.0.0.1:%d/healthz\n", rpcPort)
+	fmt.Printf("curl -s http://127.0.0.1:%d/readyz\n", rpcPort)
+	fmt.Printf("go run ./scripts/verify_network_config --config %q --rpc-url http://127.0.0.1:%d\n", configSourcePath, rpcPort)
 	if role == "bootstrap" {
 		fmt.Println("grep 'p2p listen address:' /usr/local/var/log/unified/unified-seed-node.out.log")
 	} else {
-		fmt.Println("curl -s http://127.0.0.1:8545/p2p/peers")
+		fmt.Printf("curl -s http://127.0.0.1:%d/p2p/peers\n", rpcPort)
 	}
 }
 

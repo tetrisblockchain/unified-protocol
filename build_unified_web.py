@@ -11,7 +11,7 @@ structure = {
     "unified-protocol/api/search.js": """
 export default async function handler(req, res) {
   const { query } = req.query;
-  const NODE_RPC_URL = process.env.NODE_RPC_URL || "http://your-node-ip:8545";
+  const NODE_RPC_URL = process.env.NODE_RPC_URL || "http://your-node-ip:3337";
 
   if (!query) return res.status(400).json({ error: "Missing query" });
 

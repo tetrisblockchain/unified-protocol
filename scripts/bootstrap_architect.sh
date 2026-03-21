@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 RPC_HOST="${UFI_RPC_HOST:-127.0.0.1}"
-RPC_PORT="${UFI_RPC_PORT:-8545}"
+RPC_PORT="${UFI_RPC_PORT:-3337}"
 DATADIR="${UFI_DATADIR:-$ROOT_DIR/data/genesis-architect}"
 NETWORK_CONFIG="${UFI_NETWORK_CONFIG:-}"
 P2P_LISTEN="${UFI_P2P_LISTEN:-/ip4/0.0.0.0/tcp/0}"

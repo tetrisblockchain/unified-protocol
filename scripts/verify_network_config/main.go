@@ -49,7 +49,7 @@ func run() error {
 	)
 
 	flag.StringVar(&configPath, "config", "", "path to the pinned network config JSON")
-	flag.StringVar(&rpcURL, "rpc-url", "", "optional node RPC URL, for example http://127.0.0.1:8545")
+	flag.StringVar(&rpcURL, "rpc-url", "", "optional node RPC URL, for example http://127.0.0.1:3337")
 	flag.BoolVar(&allowPlaceholders, "allow-placeholders", false, "allow placeholder genesis/architect values in the pinned config")
 	flag.Parse()
 

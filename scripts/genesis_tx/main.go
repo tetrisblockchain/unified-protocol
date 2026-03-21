@@ -23,7 +23,7 @@ import (
 
 const (
 	ufdScale               = int64(constants.BasisPoints)
-	defaultRPCURL          = "http://localhost:8545"
+	defaultRPCURL          = "http://localhost:3337"
 	defaultGenesisURL      = "https://unified.network/genesis"
 	defaultGenesisQuery    = "UniFied genesis seed"
 	defaultRegistrationFee = "10.0"

@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-RPC_URL="${UFI_RPC_URL:-http://127.0.0.1:8545}"
+RPC_URL="${UFI_RPC_URL:-http://127.0.0.1:3337}"
 BASE_URL="${RPC_URL%/rpc}"
 if [[ "$BASE_URL" == "$RPC_URL" ]]; then
   RPC_ENDPOINT="$RPC_URL/rpc"
