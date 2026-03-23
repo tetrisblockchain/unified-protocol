@@ -10,34 +10,37 @@ GO_BINARY_URL="https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
 
 # --- UI Helpers ---
 
-# Simple progress bar: progress_bar <duration_seconds> <label>
-progress_bar() {
-    local duration=$1
-    local label=$2
-    local width=40
-    echo -n "$label "
-    for ((i=0; i<=width; i++)); do
-        local percent=$(( i * 100 / width ))
-        local filled=$(( i ))
-        local empty=$(( width - i ))
-        printf "\r%s [%3d%%] [%.s#%.0s]" "$label" "$percent" $(seq 1 $filled) $(seq 1 $empty)
-        sleep "$(bc -l <<< "$duration/$width")"
-    done
-    echo ""
-}
-
 show_spinner() {
     local pid=$1
     local delay=0.1
     local spinstr='|/-\'
-    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
+    while kill -0 "$pid" 2>/dev/null; do
         local temp=${spinstr#?}
         printf " [%c]  " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
+        spinstr=$temp${spinstr%"$temp"}
         sleep $delay
         printf "\b\b\b\b\b\b"
     done
     printf "    \b\b\b\b"
+}
+
+# Fixed Download Progress Bar
+download_go() {
+    local url=$1
+    local dest=$2
+    echo "Downloading Go Binary ($GO_VERSION)..."
+    # Using curl for more reliable progress parsing
+    curl -L "$url" -o "$dest" --progress-bar 2>&1 | \
+    while read -r -d $'\r' line; do
+        # Extract percentage, ignoring non-numeric characters
+        if [[ "$line" =~ ([0-9]+(\.[0-9]+)?)% ]]; then
+            local percent="${BASH_REMATCH[1]%.*}"
+            local filled=$(( percent / 4 ))
+            local empty=$(( 25 - filled ))
+            printf "\rProgress: [%-25s] %d%%" "$(printf '#%.0s' $(seq 1 $filled 2>/dev/null || echo ""))" "$percent"
+        fi
+    done
+    echo -e "\nDownload Complete."
 }
 
 # --- Logic ---
@@ -57,7 +60,8 @@ parse_go_version() {
 }
 
 check_go_version() {
-    local version="$(parse_go_version)"
+    local version
+    version="$(parse_go_version)"
     if [[ -z "$version" ]]; then return 1; fi
     
     local major="${version%%.*}"
@@ -82,14 +86,7 @@ install_go_linux() {
     echo " Cleaned."
 
     local tmp_file="/tmp/go_dist.tar.gz"
-    echo "Downloading Go Binary..."
-    # Real progress bar using wget's output
-    wget --progress=dot "$GO_BINARY_URL" -O "$tmp_file" 2>&1 | grep --line-buffered "%" | \
-        sed -u -e "s/\([0-9]\+\)%/\1/" | while read -r n; do
-            local w=$(( n / 4 ))
-            printf "\rProgress: [%-25s] %d%%" "$(printf '#%.0s' $(seq 1 $w))" "$n"
-        done
-    echo ""
+    download_go "$GO_BINARY_URL" "$tmp_file"
 
     echo -n "Extracting to /usr/local..."
     sudo tar -C /usr/local -xzf "$tmp_file" & show_spinner $!
@@ -99,49 +96,41 @@ install_go_linux() {
         echo 'export PATH=$PATH:/usr/local/go/bin' >> "$HOME/.profile"
     fi
     
-    rm "$tmp_file"
+    rm -f "$tmp_file"
     export PATH=$PATH:/usr/local/go/bin
-    echo "Go $GO_VERSION is now installed."
 }
 
-# --- Main Script ---
+# --- Main ---
 
 clear
 echo "===================================================="
 echo "      UniFied Protocol Environment Setup            "
 echo "===================================================="
-echo "Target Workspace: $ROOT_DIR"
 
 if ! have_command go || ! check_go_version; then
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         echo "⚠️  Go $MIN_GO_MAJOR.$MIN_GO_MINOR+ is missing or outdated."
-        read -p "Download and install Go automatically? (y/n): " -n 1 -r
+        read -p "Install Go $GO_VERSION automatically? (y/n): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             install_go_linux
         else
+            echo "Exit: Go manual install required."
             exit 1
         fi
-    else
-        echo "❌ Error: Go $MIN_GO_MAJOR.$MIN_GO_MINOR+ required."
-        exit 1
     fi
 fi
 
-progress_bar 1 "Initializing Workspace..."
+echo -n "Initializing workspace directories..."
 mkdir -p "$ROOT_DIR/build" "$ROOT_DIR/data/local" "$ROOT_DIR/logs"
+echo " Done."
 
-echo "Downloading Go module dependencies..."
+echo -n "Downloading Go dependencies..."
 (cd "$ROOT_DIR" && go mod download) & show_spinner $!
-echo " Dependencies synced."
+echo " Done."
 
 echo "----------------------------------------------------"
 echo "✅ Setup Complete!"
 echo "----------------------------------------------------"
-cat <<EOF
-Next Steps:
-  1. Run 'source ~/.profile' to update your current path.
-  2. Run 'make build' to compile the protocol.
-
-See docs/runbook.md for more details.
-EOF
+echo "Run: source ~/.profile"
+echo "Then: make build"
