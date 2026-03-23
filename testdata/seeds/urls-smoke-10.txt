@@ -1,0 +1,10 @@
+https://example.com
+https://www.iana.org/domains/reserved
+https://www.wikipedia.org
+https://en.wikipedia.org/wiki/Main_Page
+https://developer.mozilla.org/en-US/docs/Web/HTTP
+https://developer.mozilla.org/en-US/docs/Web/JavaScript
+https://www.python.org
+https://docs.python.org/3/
+https://go.dev
+https://go.dev/doc/

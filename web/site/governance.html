@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UniFied Governance | Rules, Proposals, Finalization</title>
+    <link rel="icon" type="image/svg+xml" href="assets/unified-logo.svg">
+    <link rel="stylesheet" href="assets/site.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="site-body">
+    <div class="site-shell">
+        <nav class="max-w-7xl mx-auto px-6 py-6 flex flex-wrap gap-4 items-center justify-between">
+            <a href="index.html" data-rpc-link class="flex items-center gap-3">
+                <img src="assets/unified-logo.svg" alt="UniFied logo" class="h-12 w-12 rounded-2xl shadow-2xl shadow-blue-950/30">
+                <div>
+                    <div class="text-2xl font-black brand-wordmark">UNIFIED</div>
+                    <div class="eyebrow">Governance</div>
+                </div>
+            </a>
+            <div class="nav-links">
+                <a href="index.html" data-rpc-link class="nav-link">Home</a>
+                <a href="dashboard.html" data-rpc-link class="nav-link">Explorer</a>
+                <a href="search.html" data-rpc-link class="nav-link">Search</a>
+                <a href="tasks.html" data-rpc-link class="nav-link">Task Studio</a>
+                <a href="governance.html" data-rpc-link class="nav-link is-active">Governance</a>
+            </div>
+            <div id="socketState" class="pill is-warn">Polling fallback</div>
+        </nav>
+
+        <main class="max-w-7xl mx-auto px-6 pb-24">
+            <section class="grid xl:grid-cols-[1.12fr_0.88fr] gap-6 mb-6">
+                <article class="glass-panel rounded-[2rem] p-8">
+                    <div class="eyebrow mb-3">Protocol Governance</div>
+                    <h1 class="section-title text-5xl leading-[0.95] mb-4">Propose, vote, finalize, and advance the live rule set.</h1>
+                    <p class="text-slate-300 leading-8 max-w-3xl">
+                        This page talks to the node’s real governance REST endpoints. It shows proposal state, active crawl-priority rules, quorum, and emitted governance events from the connected network.
+                    </p>
+                </article>
+                <aside class="glass-panel rounded-[2rem] p-6">
+                    <div class="eyebrow mb-3">Connection</div>
+                    <div class="grid gap-3">
+                        <input id="rpcUrl" class="endpoint-input mono" placeholder="https://node.example/rpc">
+                        <div class="toolbar">
+                            <button id="connectButton" class="button-primary" type="button">Connect</button>
+                            <button id="refreshButton" class="button-secondary" type="button">Refresh</button>
+                        </div>
+                    </div>
+                    <div id="governanceBanner" class="banner banner-info mt-5">Detecting a UniFied governance endpoint...</div>
+                </aside>
+            </section>
+
+            <section class="grid sm:grid-cols-2 xl:grid-cols-6 gap-4 mb-6">
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Current Block</div>
+                    <div id="govMetricBlock" class="metric-value text-cyan-300">0</div>
+                    <div class="metric-meta">governance height</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Quorum</div>
+                    <div id="govMetricQuorum" class="metric-value text-slate-100">0.0000</div>
+                    <div class="metric-meta">votes required</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Proposals</div>
+                    <div id="govMetricProposals" class="metric-value text-slate-100">0</div>
+                    <div class="metric-meta">all tracked items</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Active</div>
+                    <div id="govMetricActive" class="metric-value text-emerald-300">0</div>
+                    <div class="metric-meta">open for votes</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Rules</div>
+                    <div id="govMetricRules" class="metric-value text-blue-300">0</div>
+                    <div class="metric-meta">priority multipliers</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Events</div>
+                    <div id="govMetricEvents" class="metric-value text-amber-300">0</div>
+                    <div class="metric-meta">emitted updates</div>
+                </article>
+            </section>
+
+            <section class="grid xl:grid-cols-[1.05fr_0.95fr_0.9fr] gap-6 mb-6">
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Proposal Ledger</div>
+                    <h2 class="section-title text-3xl mb-4">Current proposals</h2>
+                    <div id="proposalList" class="stack"></div>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <div class="eyebrow mb-2">Inspector</div>
+                            <h2 class="section-title text-3xl">Selected governance object</h2>
+                        </div>
+                        <button id="clearInspectorButton" class="button-secondary" type="button">Clear</button>
+                    </div>
+                    <div id="governanceInspector"></div>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Chain Controls</div>
+                    <h2 class="section-title text-3xl mb-4">Vote, finalize, advance</h2>
+                    <div class="action-grid">
+                        <form id="voteForm" class="grid gap-3">
+                            <input id="voteProposalId" class="field" placeholder="Proposal ID">
+                            <select id="voteChoice" class="form-select">
+                                <option value="1">Vote For</option>
+                                <option value="0">Vote Against</option>
+                                <option value="2">Abstain</option>
+                            </select>
+                            <button class="button-primary" type="submit">Cast Vote</button>
+                        </form>
+                        <form id="finalizeForm" class="grid gap-3">
+                            <input id="finalizeProposalId" class="field" placeholder="Proposal ID to finalize">
+                            <button class="button-secondary" type="submit">Finalize Proposal</button>
+                        </form>
+                        <form id="advanceForm" class="grid gap-3">
+                            <input id="advanceBlocks" class="field" value="1" placeholder="Blocks to advance">
+                            <button class="button-danger" type="submit">Advance Governance Height</button>
+                        </form>
+                        <p class="helper-text">
+                            The node applies these actions immediately against its governance store. Use them on an operator-controlled node, not an arbitrary public endpoint.
+                        </p>
+                    </div>
+                </article>
+            </section>
+
+            <section class="grid xl:grid-cols-[1fr_0.92fr_0.92fr] gap-6">
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Create Proposal</div>
+                    <h2 class="section-title text-3xl mb-4">New protocol rule</h2>
+                    <form id="proposalForm" class="grid gap-3">
+                        <input id="proposalTitle" class="field" placeholder="UGP-001 Prioritize EDU">
+                        <input id="proposalAlias" class="field" placeholder="Optional proposer alias">
+                        <input id="proposalTarget" class="field" placeholder="Target component, e.g. pouw.go">
+                        <textarea id="proposalLogic" class="field" rows="5" placeholder="Describe the logic extension or governance intent"></textarea>
+                        <div class="grid md:grid-cols-3 gap-3">
+                            <input id="proposalSector" class="field" placeholder=".edu">
+                            <input id="proposalMultiplier" class="field" type="number" value="15000" placeholder="15000">
+                            <input id="proposalStake" class="field" value="1000" placeholder="1000">
+                        </div>
+                        <button class="button-primary" type="submit">Create Proposal</button>
+                    </form>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Active Rules</div>
+                    <h2 class="section-title text-3xl mb-4">Priority registry</h2>
+                    <div id="ruleList" class="stack"></div>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Events</div>
+                    <h2 class="section-title text-3xl mb-4">Recent emissions</h2>
+                    <div id="eventList" class="stack"></div>
+                </article>
+            </section>
+        </main>
+    </div>
+
+    <script type="module" src="assets/governance.js"></script>
+</body>
+</html>

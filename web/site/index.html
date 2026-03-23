@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UniFied | Autonomous Web Ledger</title>
+    <link rel="icon" type="image/svg+xml" href="assets/unified-logo.svg">
+    <link rel="stylesheet" href="assets/site.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="site-body">
+    <div class="site-shell">
+        <nav class="max-w-7xl mx-auto px-6 py-6 flex flex-wrap gap-4 items-center justify-between">
+            <a href="index.html" data-rpc-link class="flex items-center gap-3">
+                <img src="assets/unified-logo.svg" alt="UniFied logo" class="h-12 w-12 rounded-2xl shadow-2xl shadow-blue-950/30">
+                <div>
+                    <div class="text-2xl font-black brand-wordmark">UNIFIED</div>
+                    <div class="eyebrow">Autonomous Search Layer</div>
+                </div>
+            </a>
+            <div class="nav-links">
+                <a href="index.html" data-rpc-link class="nav-link is-active">Home</a>
+                <a href="dashboard.html" data-rpc-link class="nav-link">Explorer</a>
+                <a href="search.html" data-rpc-link class="nav-link">Search</a>
+                <a href="tasks.html" data-rpc-link class="nav-link">Task Studio</a>
+                <a href="governance.html" data-rpc-link class="nav-link">Governance</a>
+            </div>
+        </nav>
+
+        <main class="max-w-7xl mx-auto px-6 pb-24">
+            <section class="grid lg:grid-cols-[1.2fr_0.88fr] gap-6 items-stretch mb-6">
+                <div class="glass-panel hero-panel rounded-[2rem] p-8 md:p-12">
+                    <div class="flex flex-wrap gap-3 items-center mb-6">
+                        <div id="heroStatus" class="pill is-muted">
+                            <span class="status-dot"></span>
+                            <span>Connecting</span>
+                        </div>
+                        <div id="socketState" class="pill is-warn">Polling fallback</div>
+                    </div>
+                    <p id="heroSubtitle" class="eyebrow mb-4">UniFied Mainnet</p>
+                    <h1 class="hero-title text-5xl md:text-7xl leading-[0.92] mb-6">
+                        Crawl the web,<br>
+                        <span class="gradient-text">anchor the truth.</span>
+                    </h1>
+                    <p class="text-lg text-slate-300 max-w-2xl leading-8 mb-8">
+                        UniFied turns crawling into consensus. Search tasks enter the network once,
+                        miners verify pages openly, and frontier tasks extend the index without a centralized gatekeeper.
+                    </p>
+                    <div class="flex flex-wrap gap-4">
+                        <button id="launchSearchButton" class="button-primary">Search the ledger</button>
+                        <button id="launchExplorerButton" class="button-secondary">Inspect live activity</button>
+                        <a href="tasks.html" data-rpc-link class="button-secondary">Quote a crawl task</a>
+                        <a href="governance.html" data-rpc-link class="button-secondary">Open governance</a>
+                    </div>
+                </div>
+
+                <aside class="glass-panel rounded-[2rem] p-6 md:p-8">
+                    <div class="eyebrow mb-3">Connection</div>
+                    <h2 class="section-title text-3xl mb-4">Live node endpoint</h2>
+                    <p class="text-slate-300 leading-7 mb-5">
+                        Point the site at any UniFied node exposing <span class="mono">/rpc</span> and optional <span class="mono">/ws</span>.
+                    </p>
+                    <div class="grid gap-3">
+                        <input id="rpcUrl" class="endpoint-input mono" placeholder="https://node.example/rpc">
+                        <div class="flex flex-wrap gap-3">
+                            <button id="connectButton" class="button-primary">Connect</button>
+                            <button id="refreshButton" class="button-secondary">Refresh snapshot</button>
+                        </div>
+                    </div>
+                    <div id="landingBanner" class="banner banner-info mt-5">Detecting a UniFied node endpoint...</div>
+                    <form id="landingSearchForm" class="mt-6 grid gap-3">
+                        <label class="eyebrow">Quick query</label>
+                        <input id="landingSearchInput" class="field" placeholder="Search a term, URL, or topic">
+                        <button class="button-secondary" type="submit">Send to ledger search</button>
+                    </form>
+                </aside>
+            </section>
+
+            <section class="grid sm:grid-cols-2 xl:grid-cols-3 gap-4 mb-6">
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Current Block</div>
+                    <div id="metricBlock" class="metric-value text-cyan-300">0</div>
+                    <div id="metricBlockMeta" class="metric-meta mono">waiting for block sync</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Connected Peers</div>
+                    <div id="metricPeers" class="metric-value text-blue-300">0</div>
+                    <div id="metricPeersMeta" class="metric-meta">0 tracked / 0 banned</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Frontier Tasks</div>
+                    <div id="metricFrontier" class="metric-value text-emerald-300">0</div>
+                    <div id="metricFrontierMeta" class="metric-meta">0 seeded tasks still queued</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Quarantined Tasks</div>
+                    <div id="metricQuarantined" class="metric-value text-amber-300">0</div>
+                    <div id="metricQuarantinedMeta" class="metric-meta">idle until next tick</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Circulating Supply</div>
+                    <div id="metricSupply" class="metric-value text-slate-100">0.0000</div>
+                    <div id="metricSupplyMeta" class="metric-meta">0 bootnodes published</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Priority Rules</div>
+                    <div id="metricRules" class="metric-value text-slate-100">0</div>
+                    <div id="metricRulesMeta" class="metric-meta">operator @ unknown</div>
+                </article>
+            </section>
+
+            <section class="grid xl:grid-cols-[1.1fr_1.1fr_0.85fr] gap-6 mb-6">
+                <article class="glass-panel section-frame">
+                    <div class="flex justify-between items-end mb-4">
+                        <div>
+                            <div class="eyebrow mb-2">Recent Transactions</div>
+                            <h2 class="section-title text-3xl">Latest confirmed chain work</h2>
+                        </div>
+                    </div>
+                    <div id="landingTransactions" class="stack"></div>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="flex justify-between items-end mb-4">
+                        <div>
+                            <div class="eyebrow mb-2">Recent Crawl Proofs</div>
+                            <h2 class="section-title text-3xl">Pages entering the ledger</h2>
+                        </div>
+                    </div>
+                    <div id="landingProofs" class="stack"></div>
+                </article>
+
+                <aside class="grid gap-4">
+                    <div id="networkSnapshot" class="grid gap-4"></div>
+                    <div id="activitySummary" class="grid gap-4"></div>
+                </aside>
+            </section>
+
+            <section class="grid md:grid-cols-3 gap-6">
+                <article class="glass-panel feature-card">
+                    <div class="eyebrow mb-3">Protocol</div>
+                    <h3 class="text-2xl font-bold mb-3">PoUW consensus</h3>
+                    <p class="text-slate-300 leading-7">
+                        Search tasks become network work. Miners compete by crawling, indexing, and proving useful pages instead of guessing hashes in isolation.
+                    </p>
+                </article>
+                <article class="glass-panel feature-card">
+                    <div class="eyebrow mb-3">Frontier</div>
+                    <h3 class="text-2xl font-bold mb-3">Autonomous follow-on crawl</h3>
+                    <p class="text-slate-300 leading-7">
+                        Once a page is verified, bounded frontier tasks extend the crawl graph. The public site now shows that live queue instead of hard-coded placeholders.
+                    </p>
+                </article>
+                <article class="glass-panel feature-card">
+                    <div class="eyebrow mb-3">Developers</div>
+                    <h3 class="text-2xl font-bold mb-3">Search, inspect, integrate</h3>
+                    <p class="text-slate-300 leading-7">
+                        Move from this landing page into the search client or explorer without changing endpoints. The site keeps the selected RPC target across pages.
+                    </p>
+                </article>
+            </section>
+        </main>
+    </div>
+
+    <script type="module" src="assets/index.js"></script>
+</body>
+</html>

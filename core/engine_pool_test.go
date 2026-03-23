@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"unified/core/consensus"
+	"unified/core/constants"
 	"unified/core/types"
 )
 
@@ -488,5 +489,119 @@ func TestMineOnceQuarantinesRepeatedSearchTaskFailures(t *testing.T) {
 	}
 	if !strings.Contains(quarantined[0].FailureReason, "max retries reached") {
 		t.Fatalf("quarantine reason = %q, want max retries", quarantined[0].FailureReason)
+	}
+}
+
+func TestMineOnceProcessesAutonomousFrontierTasks(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey returned error: %v", err)
+	}
+	sender, err := types.NewAddressFromPubKey(publicKey)
+	if err != nil {
+		t.Fatalf("NewAddressFromPubKey returned error: %v", err)
+	}
+
+	chain := openTestChain(t, filepath.Join(t.TempDir(), "chain"), map[string]*big.Int{
+		sender.String(): big.NewInt(1_000_000),
+	})
+	defer chain.Close()
+
+	request := SearchTaskRequest{
+		Query:           "autonomous frontier",
+		URL:             "https://example.com",
+		BaseBounty:      "100",
+		Difficulty:      1,
+		DataVolumeBytes: 10,
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+
+	tx := Transaction{
+		Type:  TxTypeSearchTask,
+		From:  sender.String(),
+		Value: "110",
+		Nonce: 0,
+		Data:  payload,
+	}
+	if err := tx.Sign(privateKey); err != nil {
+		t.Fatalf("Sign returned error: %v", err)
+	}
+
+	envelope, err := BuildSearchTaskEnvelope(tx, request, consensus.NewPriorityRegistry())
+	if err != nil {
+		t.Fatalf("BuildSearchTaskEnvelope returned error: %v", err)
+	}
+
+	grossBounty, _ := new(big.Int).SetString(envelope.Transaction.Value, 10)
+	architectFee := constants.ArchitectFee(grossBounty)
+	minerReward := new(big.Int).Sub(new(big.Int).Set(grossBounty), architectFee)
+	rootProof := CrawlProof{
+		TaskID:     envelope.Transaction.Hash,
+		TaskTxHash: envelope.Transaction.Hash,
+		Query:      request.Query,
+		URL:        request.URL,
+		Miner:      "UFI_TEST_MINER",
+		Page: consensus.IndexedPage{
+			URL:           request.URL,
+			Title:         "Example Domain",
+			Body:          "Root content",
+			Snippet:       "Root content",
+			ContentHash:   "root-hash",
+			SimHash:       42,
+			OutboundLinks: []string{"https://example.com/docs"},
+		},
+		GrossBounty:  grossBounty.String(),
+		ArchitectFee: architectFee.String(),
+		MinerReward:  minerReward.String(),
+		CreatedAt:    time.Now().UTC(),
+	}
+
+	if _, err := chain.MineBlock("UFI_TEST_MINER", []Transaction{envelope.Transaction}, []CrawlProof{rootProof}); err != nil {
+		t.Fatalf("MineBlock returned error: %v", err)
+	}
+
+	engine := NewEngine(chain, consensus.Miner{
+		Crawler: stubCrawler{index: func(_ context.Context, _ consensus.CrawlTask, targetURL string) (consensus.IndexedPage, error) {
+			return consensus.IndexedPage{
+				URL:         targetURL,
+				Title:       "Autonomous child",
+				Body:        "Child content",
+				Snippet:     "Child content",
+				ContentHash: "child-hash",
+				SimHash:     77,
+			}, nil
+		}},
+		PriorityRegistry: consensus.NewPriorityRegistry(),
+	}, "UFI_TEST_MINER", nil)
+
+	if status := engine.MempoolStatus(); status.PendingFrontierTasks != 1 {
+		t.Fatalf("pending frontier tasks = %d, want 1", status.PendingFrontierTasks)
+	}
+
+	block, err := engine.MineOnce(t.Context())
+	if err != nil {
+		t.Fatalf("MineOnce returned error: %v", err)
+	}
+	if block.Hash == "" {
+		t.Fatal("expected frontier mining to produce a block")
+	}
+	if len(block.Body.Transactions) != 0 {
+		t.Fatalf("block transactions = %d, want 0 for frontier-only mining", len(block.Body.Transactions))
+	}
+	if len(block.Body.CrawlProofs) != 1 {
+		t.Fatalf("crawl proofs = %d, want 1", len(block.Body.CrawlProofs))
+	}
+
+	proof := block.Body.CrawlProofs[0]
+	if proof.TaskTxHash != envelope.Transaction.Hash {
+		t.Fatalf("proof task tx hash = %s, want %s", proof.TaskTxHash, envelope.Transaction.Hash)
+	}
+	if proof.URL != "https://example.com/docs" {
+		t.Fatalf("proof URL = %s, want child URL", proof.URL)
 	}
 }

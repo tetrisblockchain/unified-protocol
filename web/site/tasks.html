@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UniFied Task Studio | Quote and Submit Crawl Work</title>
+    <link rel="icon" type="image/svg+xml" href="assets/unified-logo.svg">
+    <link rel="stylesheet" href="assets/site.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="assets/vendor/crypto-js.js"></script>
+    <script src="assets/vendor/tweetnacl-nacl-fast.min.js"></script>
+</head>
+<body class="site-body">
+    <div class="site-shell">
+        <nav class="max-w-7xl mx-auto px-6 py-6 flex flex-wrap gap-4 items-center justify-between">
+            <a href="index.html" data-rpc-link class="flex items-center gap-3">
+                <img src="assets/unified-logo.svg" alt="UniFied logo" class="h-12 w-12 rounded-2xl shadow-2xl shadow-blue-950/30">
+                <div>
+                    <div class="text-2xl font-black brand-wordmark">UNIFIED</div>
+                    <div class="eyebrow">Task Studio</div>
+                </div>
+            </a>
+            <div class="nav-links">
+                <a href="index.html" data-rpc-link class="nav-link">Home</a>
+                <a href="dashboard.html" data-rpc-link class="nav-link">Explorer</a>
+                <a href="search.html" data-rpc-link class="nav-link">Search</a>
+                <a href="tasks.html" data-rpc-link class="nav-link is-active">Task Studio</a>
+                <a href="governance.html" data-rpc-link class="nav-link">Governance</a>
+            </div>
+            <div id="socketState" class="pill is-warn">Polling fallback</div>
+        </nav>
+
+        <main class="max-w-7xl mx-auto px-6 pb-24">
+            <section class="grid xl:grid-cols-[1.1fr_0.9fr] gap-6 mb-6">
+                <article class="glass-panel rounded-[2rem] p-8">
+                    <div class="eyebrow mb-3">Task Studio</div>
+                    <h1 class="section-title text-5xl leading-[0.95] mb-4">Quote crawl work, submit signed tasks, monitor the queue.</h1>
+                    <p class="text-slate-300 leading-8 max-w-3xl">
+                        This page uses the live <span class="mono">/consensus/quote</span> endpoint and the real JSON-RPC mempool APIs. Quote tasks in UFD, inspect governance-adjusted payouts, and sign search-task transactions directly in the browser session.
+                    </p>
+                </article>
+                <aside class="glass-panel rounded-[2rem] p-6">
+                    <div class="eyebrow mb-3">Connection</div>
+                    <div class="grid gap-3">
+                        <input id="rpcUrl" class="endpoint-input mono" placeholder="https://node.example/rpc">
+                        <div class="toolbar">
+                            <button id="connectButton" class="button-primary" type="button">Connect</button>
+                            <button id="refreshButton" class="button-secondary" type="button">Refresh</button>
+                        </div>
+                    </div>
+                    <div id="taskBanner" class="banner banner-info mt-5">Detecting a UniFied task endpoint...</div>
+                </aside>
+            </section>
+
+            <section class="grid sm:grid-cols-2 xl:grid-cols-6 gap-4 mb-6">
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Current Block</div>
+                    <div id="taskMetricBlock" class="metric-value text-cyan-300">0</div>
+                    <div class="metric-meta">latest confirmed height</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Pending Search</div>
+                    <div id="taskMetricPending" class="metric-value text-slate-100">0</div>
+                    <div class="metric-meta">seeded queue</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Frontier</div>
+                    <div id="taskMetricFrontier" class="metric-value text-emerald-300">0</div>
+                    <div class="metric-meta">autonomous follow-ons</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Quarantined</div>
+                    <div id="taskMetricQuarantined" class="metric-value text-amber-300">0</div>
+                    <div class="metric-meta">blocked or failed tasks</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Recent Proofs</div>
+                    <div id="taskMetricProofs" class="metric-value text-blue-300">0</div>
+                    <div class="metric-meta">freshly indexed pages</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Peers</div>
+                    <div id="taskMetricPeers" class="metric-value text-slate-100">0</div>
+                    <div class="metric-meta">connected workers</div>
+                </article>
+            </section>
+
+            <section class="grid xl:grid-cols-[0.92fr_1.08fr] gap-6 mb-6">
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Session Wallet</div>
+                    <h2 class="section-title text-3xl mb-4">Import or generate a signer</h2>
+                    <div class="grid gap-3">
+                        <textarea id="walletPrivateKey" class="field mono" rows="5" placeholder="32-byte Ed25519 seed hex or base64"></textarea>
+                        <div class="toolbar">
+                            <button id="generateWalletButton" class="button-secondary" type="button">Generate Session Key</button>
+                            <button id="loadWalletButton" class="button-primary" type="button">Load Wallet</button>
+                            <button id="clearWalletButton" class="button-secondary" type="button">Clear</button>
+                        </div>
+                    </div>
+                    <p class="helper-text mt-4">
+                        The key stays in this page session only. It is used to derive the UFI address, fetch balance/nonces, sign the task locally, and then submit the signed transaction.
+                    </p>
+                    <div id="walletBanner" class="banner banner-info mt-5">No wallet loaded yet.</div>
+                    <div id="walletSummary" class="mt-5"></div>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Quote Search Task</div>
+                    <h2 class="section-title text-3xl mb-4">Pricing and difficulty</h2>
+                    <form id="quoteForm" class="grid gap-3">
+                        <input id="quoteQuery" class="field" value="initial web seed" placeholder="Query label">
+                        <input id="quoteUrl" class="field" placeholder="https://example.com">
+                        <div class="grid md:grid-cols-3 gap-3">
+                            <input id="quoteBaseBounty" class="field" value="1.0" placeholder="Base bounty (UFD)">
+                            <input id="quoteDifficulty" class="field" type="number" value="8" placeholder="Difficulty">
+                            <input id="quoteDataVolume" class="field" type="number" value="1024" placeholder="Data volume bytes">
+                        </div>
+                        <div class="toolbar">
+                            <button class="button-primary" type="submit">Quote Task</button>
+                            <button id="signSubmitButton" class="button-primary" type="button">Sign & Submit Task</button>
+                            <button id="copyQuoteCurl" class="button-secondary" type="button">Copy Quote Curl</button>
+                        </div>
+                    </form>
+                    <p class="helper-text mt-4">
+                        The form accepts human-readable UFD values and converts them to on-chain units before requesting the quote. Use the loaded session wallet to sign against the current pending nonce.
+                    </p>
+                </article>
+            </section>
+
+            <section class="grid xl:grid-cols-[1fr_0.95fr] gap-6 mb-6">
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Quote Result</div>
+                    <h2 class="section-title text-3xl mb-4">Adjusted payout breakdown</h2>
+                    <div id="quoteResult"></div>
+                    <div class="mt-4">
+                        <div class="eyebrow mb-2">Request Template</div>
+                        <div id="quoteHelper" class="mono-block"></div>
+                    </div>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Signed Transaction</div>
+                    <h2 class="section-title text-3xl mb-4">Raw payload and advanced broadcast</h2>
+                    <div id="signedSummary" class="mono-block mb-4"></div>
+                    <form id="rawTxForm" class="grid gap-3">
+                        <textarea id="rawTxInput" class="field mono" rows="8" placeholder="0x<signed search-task transaction hex>"></textarea>
+                        <div class="toolbar">
+                            <button class="button-primary" type="submit">Submit Raw Tx</button>
+                            <button id="copyRawRpcTemplate" class="button-secondary" type="button">Copy RPC Template</button>
+                        </div>
+                    </form>
+                    <p class="helper-text mt-4">
+                        Advanced fallback: if you want to inspect or relay the exact raw payload, it appears here after signing and can still be broadcast manually.
+                    </p>
+                </article>
+            </section>
+
+            <section class="grid xl:grid-cols-[1.05fr_0.95fr] gap-6 mb-6">
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Operational Notes</div>
+                    <h2 class="section-title text-3xl mb-4">Using all miners efficiently</h2>
+                    <div class="split-list">
+                        <div class="split-list__row"><span>Quote first</span><strong>Validate bounty, difficulty, and priority sectors before signing.</strong></div>
+                        <div class="split-list__row"><span>Seed safely</span><strong>Keep preflight on for larger batches so bad domains do not poison sender nonces.</strong></div>
+                        <div class="split-list__row"><span>Monitor frontier</span><strong>After the first successful proofs, frontier tasks let the network continue autonomously.</strong></div>
+                    </div>
+                </article>
+            </section>
+
+            <section class="grid xl:grid-cols-[1fr_1fr_1fr] gap-6">
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Pending Search Tasks</div>
+                    <h2 class="section-title text-3xl mb-4">Seeded queue</h2>
+                    <div id="taskPendingList" class="stack"></div>
+                </article>
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Quarantined</div>
+                    <h2 class="section-title text-3xl mb-4">Blocked or terminal failures</h2>
+                    <div id="taskQuarantinedList" class="stack"></div>
+                </article>
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Recent Crawl Proofs</div>
+                    <h2 class="section-title text-3xl mb-4">Freshly indexed pages</h2>
+                    <div id="taskProofList" class="stack"></div>
+                </article>
+            </section>
+        </main>
+    </div>
+
+    <script type="module" src="assets/tasks.js"></script>
+</body>
+</html>

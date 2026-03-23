@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"math/big"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"unified/core/consensus"
 	"unified/core/constants"
@@ -480,5 +482,214 @@ func TestBlockchainPersistsNetworkConfigAndRejectsArchitectMismatch(t *testing.T
 		Network:         conflict,
 	}); err == nil || !strings.Contains(err.Error(), "architect address mismatch") {
 		t.Fatalf("reopen with mismatched architect returned %v, want mismatch error", err)
+	}
+}
+
+func TestApplyCrawlProofSpawnsAutonomousChildTasks(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	sender, err := types.NewAddressFromPubKey(publicKey)
+	if err != nil {
+		t.Fatalf("derive sender address: %v", err)
+	}
+
+	chain := openTestChain(t, filepath.Join(t.TempDir(), "chain"), map[string]*big.Int{
+		sender.String(): big.NewInt(10_000),
+	})
+	defer chain.Close()
+
+	request := SearchTaskRequest{
+		Query:           "recursive crawl",
+		URL:             "https://example.com",
+		BaseBounty:      "100",
+		Difficulty:      1,
+		DataVolumeBytes: 10,
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal task request: %v", err)
+	}
+
+	tx := Transaction{
+		Type:  TxTypeSearchTask,
+		From:  sender.String(),
+		Value: "110",
+		Nonce: 0,
+		Data:  payload,
+	}
+	if err := tx.Sign(privateKey); err != nil {
+		t.Fatalf("sign search task tx: %v", err)
+	}
+
+	envelope, err := BuildSearchTaskEnvelope(tx, request, consensus.NewPriorityRegistry())
+	if err != nil {
+		t.Fatalf("build search task envelope: %v", err)
+	}
+
+	grossBounty, _ := new(big.Int).SetString(envelope.Transaction.Value, 10)
+	architectFee := constants.ArchitectFee(grossBounty)
+	minerReward := new(big.Int).Sub(new(big.Int).Set(grossBounty), architectFee)
+	proof := CrawlProof{
+		TaskID:     envelope.Transaction.Hash,
+		TaskTxHash: envelope.Transaction.Hash,
+		Query:      request.Query,
+		URL:        request.URL,
+		Miner:      "UFI_TEST_MINER",
+		Page: consensus.IndexedPage{
+			URL:           request.URL,
+			Title:         "Example Domain",
+			Body:          "Example Domain content",
+			Snippet:       "Example Domain content",
+			ContentHash:   "abc123",
+			SimHash:       42,
+			OutboundLinks: []string{"https://example.com/docs", "https://www.iana.org/domains/example"},
+		},
+		GrossBounty:  grossBounty.String(),
+		ArchitectFee: architectFee.String(),
+		MinerReward:  minerReward.String(),
+		CreatedAt:    time.Now().UTC(),
+	}
+
+	if _, err := chain.MineBlock("UFI_TEST_MINER", []Transaction{envelope.Transaction}, []CrawlProof{proof}); err != nil {
+		t.Fatalf("mine block: %v", err)
+	}
+
+	snapshot, _ := chain.Snapshot()
+	rootTask, ok := snapshot.PendingTasks[envelope.Transaction.Hash]
+	if !ok {
+		t.Fatalf("expected root task %s in state", envelope.Transaction.Hash)
+	}
+	if !rootTask.Completed {
+		t.Fatal("expected root task to be settled")
+	}
+
+	children := make([]SearchTaskRecord, 0, 2)
+	for _, task := range snapshot.PendingTasks {
+		if task.ParentTaskID == rootTask.ID {
+			children = append(children, task)
+		}
+	}
+	if len(children) != 2 {
+		t.Fatalf("spawned child tasks = %d, want 2", len(children))
+	}
+
+	sort.Slice(children, func(i, j int) bool { return children[i].URL < children[j].URL })
+	for _, child := range children {
+		if !child.Autonomous {
+			t.Fatalf("child task %+v is not marked autonomous", child)
+		}
+		if child.Depth != 1 {
+			t.Fatalf("child depth = %d, want 1", child.Depth)
+		}
+		if child.TxHash != envelope.Transaction.Hash {
+			t.Fatalf("child tx hash = %s, want origin %s", child.TxHash, envelope.Transaction.Hash)
+		}
+		if child.GrossBounty != "0" || child.ArchitectFee != "0" || child.MinerReward != "0" {
+			t.Fatalf("child rewards = (%s,%s,%s), want all zero", child.GrossBounty, child.ArchitectFee, child.MinerReward)
+		}
+	}
+}
+
+func TestBlockchainReloadPreservesLargeIndexedPages(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	sender, err := types.NewAddressFromPubKey(publicKey)
+	if err != nil {
+		t.Fatalf("derive sender address: %v", err)
+	}
+
+	datadir := filepath.Join(t.TempDir(), "chain")
+	genesisBalances := map[string]*big.Int{
+		sender.String(): big.NewInt(1_000_000),
+	}
+
+	chain := openTestChain(t, datadir, genesisBalances)
+
+	request := SearchTaskRequest{
+		Query:           "npm docs",
+		URL:             "https://docs.npmjs.com/cli",
+		BaseBounty:      "100",
+		Difficulty:      1,
+		DataVolumeBytes: 10,
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	tx := Transaction{
+		Type:  TxTypeSearchTask,
+		From:  sender.String(),
+		Value: "110",
+		Nonce: 0,
+		Data:  payload,
+	}
+	if err := tx.Sign(privateKey); err != nil {
+		t.Fatalf("sign search task tx: %v", err)
+	}
+
+	envelope, err := BuildSearchTaskEnvelope(tx, request, consensus.NewPriorityRegistry())
+	if err != nil {
+		t.Fatalf("build search task envelope: %v", err)
+	}
+
+	grossBounty, _ := new(big.Int).SetString(envelope.Transaction.Value, 10)
+	architectFee := constants.ArchitectFee(grossBounty)
+	minerReward := new(big.Int).Sub(new(big.Int).Set(grossBounty), architectFee)
+	largeBody := strings.Repeat("npm cli docs content ", 2048)
+	proof := CrawlProof{
+		TaskID:     envelope.Transaction.Hash,
+		TaskTxHash: envelope.Transaction.Hash,
+		Query:      request.Query,
+		URL:        request.URL,
+		Miner:      "UFI_TEST_MINER",
+		Page: consensus.IndexedPage{
+			URL:         request.URL,
+			Title:       "npm cli docs",
+			Body:        largeBody,
+			Snippet:     "npm cli docs",
+			ContentHash: "npm-docs-hash",
+			SimHash:     77,
+		},
+		GrossBounty:  grossBounty.String(),
+		ArchitectFee: architectFee.String(),
+		MinerReward:  minerReward.String(),
+		CreatedAt:    time.Now().UTC(),
+	}
+
+	mined, err := chain.MineBlock("UFI_TEST_MINER", []Transaction{envelope.Transaction}, []CrawlProof{proof})
+	if err != nil {
+		t.Fatalf("mine block: %v", err)
+	}
+	if err := chain.Close(); err != nil {
+		t.Fatalf("close chain: %v", err)
+	}
+
+	reloaded := openTestChain(t, datadir, genesisBalances)
+	defer reloaded.Close()
+
+	if reloaded.latest.Hash != mined.Hash {
+		t.Fatalf("latest hash = %s, want %s", reloaded.latest.Hash, mined.Hash)
+	}
+	reloadedRecord, ok := reloaded.state.SearchIndex[request.URL]
+	if !ok {
+		t.Fatalf("expected search record for %s after reload", request.URL)
+	}
+	if reloadedRecord.Body != largeBody {
+		t.Fatalf("reloaded body length = %d, want %d", len(reloadedRecord.Body), len(largeBody))
+	}
+
+	block, err := reloaded.GetBlockByNumber(mined.Header.Number)
+	if err != nil {
+		t.Fatalf("GetBlockByNumber returned error: %v", err)
+	}
+	if block.Hash != mined.Hash {
+		t.Fatalf("block hash = %s, want %s", block.Hash, mined.Hash)
 	}
 }

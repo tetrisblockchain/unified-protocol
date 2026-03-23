@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UniFied Search | Query the Ledger</title>
+    <link rel="icon" type="image/svg+xml" href="assets/unified-logo.svg">
+    <link rel="stylesheet" href="assets/site.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="site-body">
+    <div class="site-shell">
+        <nav class="max-w-7xl mx-auto px-6 py-6 flex flex-wrap gap-4 items-center justify-between">
+            <a href="index.html" data-rpc-link class="flex items-center gap-3">
+                <img src="assets/unified-logo.svg" alt="UniFied logo" class="h-12 w-12 rounded-2xl shadow-2xl shadow-blue-950/30">
+                <div>
+                    <div class="text-2xl font-black brand-wordmark">UNIFIED</div>
+                    <div class="eyebrow">Ledger Search</div>
+                </div>
+            </a>
+            <div class="flex flex-wrap items-center gap-3">
+                <div class="nav-links">
+                    <a href="index.html" data-rpc-link class="nav-link">Home</a>
+                    <a href="dashboard.html" data-rpc-link class="nav-link">Explorer</a>
+                    <a href="search.html" data-rpc-link class="nav-link is-active">Search</a>
+                    <a href="tasks.html" data-rpc-link class="nav-link">Task Studio</a>
+                    <a href="governance.html" data-rpc-link class="nav-link">Governance</a>
+                </div>
+                <div id="socketState" class="pill is-warn">Polling fallback</div>
+            </div>
+        </nav>
+
+        <main class="max-w-7xl mx-auto px-6 pb-24">
+            <section class="grid xl:grid-cols-[1.12fr_0.88fr] gap-6 mb-6">
+                <article class="glass-panel rounded-[2rem] p-8">
+                    <div class="eyebrow mb-3">Search the Ledger</div>
+                    <h1 class="section-title text-5xl leading-[0.95] mb-4">Query indexed web pages directly from chain state.</h1>
+                    <p class="text-slate-300 leading-8 max-w-3xl">
+                        This page uses the real <span class="mono">ufi_searchIndex</span> and <span class="mono">ufi_getSearchData</span> RPC methods.
+                        Click a hit to inspect the stored page body, snippet, original query, and indexing metadata.
+                    </p>
+                </article>
+                <aside class="glass-panel rounded-[2rem] p-6">
+                    <div class="eyebrow mb-3">Connection</div>
+                    <div class="grid gap-3">
+                        <input id="rpcUrl" class="endpoint-input mono" placeholder="https://node.example/rpc">
+                        <button id="connectButton" class="button-primary">Connect</button>
+                    </div>
+                    <div id="searchBanner" class="banner banner-info mt-5">Detecting a UniFied node endpoint...</div>
+                </aside>
+            </section>
+
+            <section class="grid sm:grid-cols-2 xl:grid-cols-6 gap-4 mb-6">
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Network</div>
+                    <div id="searchMetricNetwork" class="metric-value text-slate-100">Unknown</div>
+                    <div class="metric-meta">active endpoint</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Current Block</div>
+                    <div id="searchMetricBlock" class="metric-value text-cyan-300">0</div>
+                    <div class="metric-meta">latest known tip</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Frontier</div>
+                    <div id="searchMetricFrontier" class="metric-value text-emerald-300">0</div>
+                    <div class="metric-meta">autonomous crawl queue</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Pending Search</div>
+                    <div id="searchMetricSearchTasks" class="metric-value text-slate-100">0</div>
+                    <div class="metric-meta">seeded task backlog</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Results</div>
+                    <div id="searchMetricResults" class="metric-value text-slate-100">0</div>
+                    <div class="metric-meta">current query total</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Mentions</div>
+                    <div id="searchMetricMentions" class="metric-value text-amber-300">0</div>
+                    <div class="metric-meta">term frequency</div>
+                </article>
+            </section>
+
+            <section class="glass-panel rounded-[2rem] p-6 mb-6">
+                <form id="searchForm" class="grid xl:grid-cols-[1.35fr_1fr_150px_180px] gap-3">
+                    <input id="searchInput" class="field" placeholder="Search term">
+                    <input id="searchUrlFilter" class="field" placeholder="Optional URL or domain filter">
+                    <select id="searchLimit" class="form-select">
+                        <option value="10">10 results</option>
+                        <option value="20">20 results</option>
+                        <option value="30">30 results</option>
+                    </select>
+                    <button class="button-primary" type="submit">Search index</button>
+                </form>
+            </section>
+
+            <section class="grid xl:grid-cols-[1.08fr_0.92fr_0.78fr] gap-6">
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Results</div>
+                    <h2 class="section-title text-3xl mb-4">Matched documents</h2>
+                    <div id="searchResults" class="stack"></div>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Inspector</div>
+                    <h2 class="section-title text-3xl mb-4">Selected result</h2>
+                    <div id="searchInspector"></div>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Recent Proofs</div>
+                    <h2 class="section-title text-3xl mb-4">Freshly indexed pages</h2>
+                    <div id="searchRecentProofs" class="stack"></div>
+                </article>
+            </section>
+        </main>
+    </div>
+
+    <script type="module" src="assets/search.js"></script>
+</body>
+</html>

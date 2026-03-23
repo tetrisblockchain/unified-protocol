@@ -1,16 +1,20 @@
 package core
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -52,6 +56,11 @@ const (
 	metaNetworkConfigKey = "meta/network_config"
 	metaLatestHashKey    = "meta/latest_hash"
 	metaLatestBlockKey   = "meta/latest_number"
+
+	autonomousCrawlMaxDepth         = uint64(2)
+	autonomousCrawlLinksPerProof    = 4
+	autonomousCrawlPendingTaskLimit = 1024
+	storageCompressionThreshold     = 4 << 10
 )
 
 var (
@@ -96,6 +105,9 @@ type SearchTaskRecord struct {
 	Difficulty      uint64    `json:"difficulty"`
 	DataVolumeBytes uint64    `json:"dataVolumeBytes"`
 	CreatedAt       time.Time `json:"createdAt"`
+	Autonomous      bool      `json:"autonomous,omitempty"`
+	ParentTaskID    string    `json:"parentTaskId,omitempty"`
+	Depth           uint64    `json:"depth,omitempty"`
 	Completed       bool      `json:"completed"`
 	CompletedAt     time.Time `json:"completedAt,omitempty"`
 	ProofHash       string    `json:"proofHash,omitempty"`
@@ -548,6 +560,40 @@ func (bc *Blockchain) SearchIndex(term, urlFilter string, limit uint64) SearchRe
 	return result
 }
 
+func (bc *Blockchain) PendingSearchTaskRecords(limit int) []SearchTaskRecord {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	records := make([]SearchTaskRecord, 0, len(bc.state.PendingTasks))
+	for _, task := range bc.state.PendingTasks {
+		if task.Completed {
+			continue
+		}
+		records = append(records, task)
+	}
+	sortPendingSearchTaskRecords(records)
+	if limit > 0 && len(records) > limit {
+		records = records[:limit]
+	}
+	return records
+}
+
+func (bc *Blockchain) PendingSearchTaskSummary() (pending int, autonomous int) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	for _, task := range bc.state.PendingTasks {
+		if task.Completed {
+			continue
+		}
+		pending++
+		if task.Autonomous {
+			autonomous++
+		}
+	}
+	return pending, autonomous
+}
+
 func (bc *Blockchain) PrecompileMentionFrequency(term string) ([]byte, error) {
 	input, err := EncodeMentionFrequencyCall(term)
 	if err != nil {
@@ -693,7 +739,7 @@ func (bc *Blockchain) GetBlockByNumber(number uint64) (Block, error) {
 			return err
 		}
 		return item.Value(func(value []byte) error {
-			return json.Unmarshal(value, &block)
+			return decodeStoredJSON(value, &block)
 		})
 	})
 	return block, err
@@ -717,7 +763,7 @@ func (bc *Blockchain) GetBlockByHash(hash string) (Block, error) {
 			return err
 		}
 		return item.Value(func(value []byte) error {
-			return json.Unmarshal(value, &block)
+			return decodeStoredJSON(value, &block)
 		})
 	})
 	return block, err
@@ -965,21 +1011,12 @@ func (bc *Blockchain) getStateSnapshotLocked(hash string) (*StateSnapshot, error
 
 	var snapshot *StateSnapshot
 	err := bc.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte(stateSnapshotKey(hash)))
+		loaded, err := loadStateSnapshotTxn(txn, hash)
 		if err != nil {
-			if errors.Is(err, badger.ErrKeyNotFound) {
-				return ErrBlockNotFound
-			}
 			return err
 		}
-		return item.Value(func(value []byte) error {
-			loaded, err := unmarshalStateSnapshot(value)
-			if err != nil {
-				return err
-			}
-			snapshot = loaded
-			return nil
-		})
+		snapshot = loaded
+		return nil
 	})
 	return snapshot, err
 }
@@ -1406,6 +1443,9 @@ func ApplyCrawlProof(state *StateSnapshot, proof CrawlProof, blockHash string) (
 	task.ProofHash = normalized.ProofHash
 	task.MinedBy = normalized.Miner
 	state.PendingTasks[task.ID] = task
+	for _, spawned := range buildAutonomousSearchTaskRecords(state, task, normalized) {
+		state.PendingTasks[spawned.ID] = spawned
+	}
 	return normalized, nil
 }
 
@@ -1560,6 +1600,239 @@ func normalizeCrawlProof(proof CrawlProof) (CrawlProof, error) {
 		return CrawlProof{}, ErrInvalidBlock
 	}
 	return normalized, nil
+}
+
+func buildAutonomousSearchTaskRecords(state *StateSnapshot, parent SearchTaskRecord, proof CrawlProof) []SearchTaskRecord {
+	if state == nil {
+		return nil
+	}
+	if parent.Autonomous && parent.Depth >= autonomousCrawlMaxDepth {
+		return nil
+	}
+	if len(proof.Page.OutboundLinks) == 0 {
+		return nil
+	}
+
+	activeAutonomous := countActiveAutonomousSearchTasks(state)
+	if activeAutonomous >= autonomousCrawlPendingTaskLimit {
+		return nil
+	}
+
+	candidates := selectAutonomousOutboundLinks(state, parent, proof)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	remainingSlots := autonomousCrawlPendingTaskLimit - activeAutonomous
+	limit := autonomousCrawlLinksPerProof
+	if remainingSlots < limit {
+		limit = remainingSlots
+	}
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+
+	nextDepth := parent.Depth + 1
+	originTxHash := strings.TrimSpace(parent.TxHash)
+	if originTxHash == "" {
+		originTxHash = parent.ID
+	}
+
+	spawned := make([]SearchTaskRecord, 0, len(candidates))
+	for _, target := range candidates {
+		record := SearchTaskRecord{
+			ID:              buildAutonomousSearchTaskID(parent.ID, target, nextDepth),
+			TxHash:          originTxHash,
+			Submitter:       parent.Submitter,
+			Query:           parent.Query,
+			URL:             target,
+			BaseBounty:      "0",
+			GrossBounty:     "0",
+			ArchitectFee:    "0",
+			MinerReward:     "0",
+			Difficulty:      0,
+			DataVolumeBytes: 0,
+			CreatedAt:       proof.CreatedAt,
+			Autonomous:      true,
+			ParentTaskID:    parent.ID,
+			Depth:           nextDepth,
+		}
+		spawned = append(spawned, record)
+	}
+	return spawned
+}
+
+func selectAutonomousOutboundLinks(state *StateSnapshot, parent SearchTaskRecord, proof CrawlProof) []string {
+	type candidate struct {
+		url          string
+		sameHost     bool
+		hasQuery     bool
+		pathSegments int
+		length       int
+	}
+
+	parentURL, err := url.Parse(strings.TrimSpace(proof.URL))
+	if err != nil {
+		parentURL, _ = url.Parse(strings.TrimSpace(parent.URL))
+	}
+	parentHost := ""
+	if parentURL != nil {
+		parentHost = strings.ToLower(parentURL.Hostname())
+	}
+
+	candidates := make([]candidate, 0, len(proof.Page.OutboundLinks))
+	seen := make(map[string]struct{}, len(proof.Page.OutboundLinks))
+	for _, raw := range proof.Page.OutboundLinks {
+		target, err := normalizeSearchTaskURL(raw)
+		if err != nil {
+			continue
+		}
+		if target == strings.TrimSpace(proof.URL) || target == strings.TrimSpace(parent.URL) {
+			continue
+		}
+		if shouldSkipAutonomousURL(target) {
+			continue
+		}
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		if _, ok := state.SearchIndex[target]; ok {
+			continue
+		}
+		if stateHasActiveSearchTaskURL(state, target) {
+			continue
+		}
+
+		parsed, err := url.Parse(target)
+		if err != nil {
+			continue
+		}
+		seen[target] = struct{}{}
+		candidates = append(candidates, candidate{
+			url:          target,
+			sameHost:     parentHost != "" && strings.EqualFold(parsed.Hostname(), parentHost),
+			hasQuery:     parsed.RawQuery != "",
+			pathSegments: countURLPathSegments(parsed.Path),
+			length:       len(target),
+		})
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].sameHost != candidates[j].sameHost {
+			return candidates[i].sameHost
+		}
+		if candidates[i].hasQuery != candidates[j].hasQuery {
+			return !candidates[i].hasQuery
+		}
+		if candidates[i].pathSegments != candidates[j].pathSegments {
+			return candidates[i].pathSegments < candidates[j].pathSegments
+		}
+		if candidates[i].length != candidates[j].length {
+			return candidates[i].length < candidates[j].length
+		}
+		return candidates[i].url < candidates[j].url
+	})
+
+	out := make([]string, 0, len(candidates))
+	for _, item := range candidates {
+		out = append(out, item.url)
+	}
+	return out
+}
+
+func buildAutonomousSearchTaskID(parentTaskID, target string, depth uint64) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		strings.TrimSpace(parentTaskID),
+		strconv.FormatUint(depth, 10),
+		strings.TrimSpace(target),
+	}, "|")))
+	return hex.EncodeToString(sum[:16])
+}
+
+func normalizeSearchTaskURL(raw string) (string, error) {
+	target, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || target.Scheme == "" || target.Host == "" {
+		return "", ErrInvalidTransaction
+	}
+
+	target.Fragment = ""
+	target.Scheme = strings.ToLower(target.Scheme)
+	target.Host = strings.ToLower(target.Host)
+	if target.Scheme != "http" && target.Scheme != "https" {
+		return "", ErrInvalidTransaction
+	}
+	return target.String(), nil
+}
+
+func shouldSkipAutonomousURL(target string) bool {
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return true
+	}
+	switch strings.ToLower(path.Ext(parsed.EscapedPath())) {
+	case ".7z", ".avi", ".bin", ".bmp", ".css", ".csv", ".doc", ".docx", ".gif", ".gz",
+		".ico", ".jpeg", ".jpg", ".js", ".json", ".m4a", ".mov", ".mp3", ".mp4", ".pdf",
+		".png", ".ppt", ".pptx", ".rss", ".svg", ".tar", ".tgz", ".txt", ".wav", ".webm",
+		".webp", ".woff", ".woff2", ".xls", ".xlsx", ".xml", ".zip":
+		return true
+	}
+	return false
+}
+
+func countURLPathSegments(rawPath string) int {
+	trimmed := strings.Trim(rawPath, "/")
+	if trimmed == "" {
+		return 0
+	}
+	return len(strings.Split(trimmed, "/"))
+}
+
+func stateHasActiveSearchTaskURL(state *StateSnapshot, target string) bool {
+	for _, task := range state.PendingTasks {
+		if task.Completed {
+			continue
+		}
+		if task.URL == target {
+			return true
+		}
+	}
+	return false
+}
+
+func countActiveAutonomousSearchTasks(state *StateSnapshot) int {
+	count := 0
+	for _, task := range state.PendingTasks {
+		if task.Completed || !task.Autonomous {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func sortPendingSearchTaskRecords(records []SearchTaskRecord) {
+	sort.Slice(records, func(i, j int) bool {
+		leftValue := searchTaskRecordGrossBounty(records[i])
+		rightValue := searchTaskRecordGrossBounty(records[j])
+		if cmp := leftValue.Cmp(rightValue); cmp != 0 {
+			return cmp > 0
+		}
+		if records[i].Depth != records[j].Depth {
+			return records[i].Depth < records[j].Depth
+		}
+		if !records[i].CreatedAt.Equal(records[j].CreatedAt) {
+			return records[i].CreatedAt.Before(records[j].CreatedAt)
+		}
+		return records[i].ID < records[j].ID
+	})
+}
+
+func searchTaskRecordGrossBounty(record SearchTaskRecord) *big.Int {
+	value, ok := new(big.Int).SetString(strings.TrimSpace(record.GrossBounty), 10)
+	if !ok {
+		return big.NewInt(0)
+	}
+	return value
 }
 
 func (tx Transaction) signingPayload() []byte {
@@ -1761,6 +2034,46 @@ func (bc *Blockchain) loadLocked() error {
 			return err
 		}
 
+		var latestHash string
+		item, err = txn.Get([]byte(metaLatestHashKey))
+		if err == nil {
+			if err := item.Value(func(value []byte) error {
+				latestHash = strings.TrimSpace(string(value))
+				return nil
+			}); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+
+		if latestHash != "" {
+			latest, err := loadBlockTxn(txn, latestHash)
+			if err != nil && !errors.Is(err, ErrBlockNotFound) {
+				return err
+			}
+			if err == nil {
+				latestMeta, metaErr := loadBlockMetaTxn(txn, latestHash)
+				if metaErr != nil && !errors.Is(metaErr, ErrBlockNotFound) {
+					return metaErr
+				}
+				latestState, stateErr := loadStateSnapshotTxn(txn, latestHash)
+				if stateErr != nil && !errors.Is(stateErr, ErrBlockNotFound) {
+					return stateErr
+				}
+				if stateErr == nil {
+					bc.latest = latest
+					if metaErr == nil {
+						bc.latestMeta = latestMeta
+					} else {
+						bc.latestMeta = syntheticLatestMeta(latest)
+					}
+					bc.state = latestState
+					return nil
+				}
+			}
+		}
+
 		if err := iteratePrefix(txn, []byte(balancePrefix), func(key, value []byte) error {
 			amount, ok := new(big.Int).SetString(string(value), 10)
 			if !ok {
@@ -1783,7 +2096,7 @@ func (bc *Blockchain) loadLocked() error {
 		}
 		if err := iteratePrefix(txn, []byte(searchPrefix), func(_, value []byte) error {
 			var record SearchRecord
-			if err := json.Unmarshal(value, &record); err != nil {
+			if err := decodeStoredJSON(value, &record); err != nil {
 				return err
 			}
 			if record.TermCounts == nil {
@@ -1806,7 +2119,7 @@ func (bc *Blockchain) loadLocked() error {
 		}
 		if err := iteratePrefix(txn, []byte(taskPrefix), func(_, value []byte) error {
 			var record SearchTaskRecord
-			if err := json.Unmarshal(value, &record); err != nil {
+			if err := decodeStoredJSON(value, &record); err != nil {
 				return err
 			}
 			bc.state.PendingTasks[record.ID] = record
@@ -1816,7 +2129,7 @@ func (bc *Blockchain) loadLocked() error {
 		}
 		if err := iteratePrefix(txn, []byte(namePrefix), func(_, value []byte) error {
 			var record NameRecord
-			if err := json.Unmarshal(value, &record); err != nil {
+			if err := decodeStoredJSON(value, &record); err != nil {
 				return err
 			}
 			bc.state.Names[record.Name] = record
@@ -1850,7 +2163,7 @@ func (bc *Blockchain) loadLocked() error {
 			return err
 		}
 		if err := item.Value(func(value []byte) error {
-			return json.Unmarshal(value, &bc.latest)
+			return decodeStoredJSON(value, &bc.latest)
 		}); err != nil {
 			return err
 		}
@@ -1883,9 +2196,6 @@ func (bc *Blockchain) persistCanonicalTipLocked(state *StateSnapshot, block Bloc
 		if err := persistNetworkConfig(txn, bc.network); err != nil {
 			return err
 		}
-		if err := persistState(txn, state); err != nil {
-			return err
-		}
 		if err := txn.Set([]byte(metaLatestHashKey), []byte(block.Hash)); err != nil {
 			return err
 		}
@@ -1908,11 +2218,14 @@ func (bc *Blockchain) persistStateOnlyLocked() error {
 		if err := persistNetworkConfig(txn, bc.network); err != nil {
 			return err
 		}
-		if err := persistState(txn, bc.state); err != nil {
-			return err
-		}
 		if strings.TrimSpace(bc.latest.Hash) == "" {
 			return nil
+		}
+		if err := txn.Set([]byte(metaLatestHashKey), []byte(bc.latest.Hash)); err != nil {
+			return err
+		}
+		if err := txn.Set([]byte(metaLatestBlockKey), []byte(strconv.FormatUint(bc.latest.Header.Number, 10))); err != nil {
+			return err
 		}
 		return persistStateSnapshot(txn, bc.latest.Hash, bc.state)
 	})
@@ -1932,9 +2245,6 @@ func (bc *Blockchain) storeImportedBlockLocked(state *StateSnapshot, block Block
 		if err := persistNetworkConfig(txn, bc.network); err != nil {
 			return err
 		}
-		if err := persistState(txn, state); err != nil {
-			return err
-		}
 		if err := txn.Set([]byte(metaLatestHashKey), []byte(block.Hash)); err != nil {
 			return err
 		}
@@ -1952,7 +2262,7 @@ func (bc *Blockchain) storeImportedBlockLocked(state *StateSnapshot, block Block
 }
 
 func persistBlockArtifacts(txn *badger.Txn, state *StateSnapshot, block Block, meta BlockMeta) error {
-	blockPayload, err := json.Marshal(block)
+	blockPayload, err := encodeStoredJSON(block)
 	if err != nil {
 		return err
 	}
@@ -1980,6 +2290,10 @@ func persistBlockArtifacts(txn *badger.Txn, state *StateSnapshot, block Block, m
 
 func persistStateSnapshot(txn *badger.Txn, blockHash string, state *StateSnapshot) error {
 	payload, err := marshalStateSnapshot(state)
+	if err != nil {
+		return err
+	}
+	payload, err = compressForStorage(payload)
 	if err != nil {
 		return err
 	}
@@ -2028,7 +2342,7 @@ func rewriteCanonicalTip(txn *badger.Txn, oldTipHash, newTipHash string) error {
 		if err != nil {
 			return err
 		}
-		payload, err := json.Marshal(block)
+		payload, err := encodeStoredJSON(block)
 		if err != nil {
 			return err
 		}
@@ -2129,7 +2443,7 @@ func loadBlockTxn(txn *badger.Txn, hash string) (Block, error) {
 		return Block{}, err
 	}
 	err = item.Value(func(value []byte) error {
-		return json.Unmarshal(value, &block)
+		return decodeStoredJSON(value, &block)
 	})
 	return block, err
 }
@@ -2152,7 +2466,7 @@ func persistState(txn *badger.Txn, state *StateSnapshot) error {
 		}
 	}
 	for url, record := range state.SearchIndex {
-		payload, err := json.Marshal(record)
+		payload, err := encodeStoredJSON(record)
 		if err != nil {
 			return err
 		}
@@ -2166,7 +2480,7 @@ func persistState(txn *badger.Txn, state *StateSnapshot) error {
 		}
 	}
 	for id, task := range state.PendingTasks {
-		payload, err := json.Marshal(task)
+		payload, err := encodeStoredJSON(task)
 		if err != nil {
 			return err
 		}
@@ -2175,7 +2489,7 @@ func persistState(txn *badger.Txn, state *StateSnapshot) error {
 		}
 	}
 	for name, record := range state.Names {
-		payload, err := json.Marshal(record)
+		payload, err := encodeStoredJSON(record)
 		if err != nil {
 			return err
 		}
@@ -2215,6 +2529,83 @@ func iteratePrefix(txn *badger.Txn, prefix []byte, fn func(key, value []byte) er
 	return nil
 }
 
+func loadStateSnapshotTxn(txn *badger.Txn, hash string) (*StateSnapshot, error) {
+	item, err := txn.Get([]byte(stateSnapshotKey(hash)))
+	if err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil, ErrBlockNotFound
+		}
+		return nil, err
+	}
+
+	var snapshot *StateSnapshot
+	if err := item.Value(func(value []byte) error {
+		loaded, err := unmarshalStateSnapshot(value)
+		if err != nil {
+			return err
+		}
+		snapshot = loaded
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return snapshot, nil
+}
+
+func encodeStoredJSON(value any) ([]byte, error) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return compressForStorage(payload)
+}
+
+func decodeStoredJSON(payload []byte, target any) error {
+	decoded, err := decompressStoredPayload(payload)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(decoded, target)
+}
+
+func compressForStorage(payload []byte) ([]byte, error) {
+	if len(payload) < storageCompressionThreshold {
+		return payload, nil
+	}
+
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(payload); err != nil {
+		_ = zw.Close()
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	if buf.Len() >= len(payload) {
+		return payload, nil
+	}
+	return buf.Bytes(), nil
+}
+
+func decompressStoredPayload(payload []byte) ([]byte, error) {
+	if len(payload) < 2 || payload[0] != 0x1f || payload[1] != 0x8b {
+		return payload, nil
+	}
+
+	zr, err := gzip.NewReader(bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	defer zr.Close()
+
+	decoded, err := io.ReadAll(zr)
+	if err != nil {
+		return nil, err
+	}
+	return decoded, nil
+}
+
 func marshalStateSnapshot(state *StateSnapshot) ([]byte, error) {
 	disk := stateSnapshotDisk{
 		Balances:      make(map[string]string, len(state.Balances)),
@@ -2242,8 +2633,13 @@ func marshalStateSnapshot(state *StateSnapshot) ([]byte, error) {
 }
 
 func unmarshalStateSnapshot(data []byte) (*StateSnapshot, error) {
+	decoded, err := decompressStoredPayload(data)
+	if err != nil {
+		return nil, err
+	}
+
 	var disk stateSnapshotDisk
-	if err := json.Unmarshal(data, &disk); err != nil {
+	if err := json.Unmarshal(decoded, &disk); err != nil {
 		return nil, err
 	}
 	snapshot := NewStateSnapshot()

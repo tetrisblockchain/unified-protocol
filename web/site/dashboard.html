@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UniFied Explorer | Live Network Dashboard</title>
+    <link rel="icon" type="image/svg+xml" href="assets/unified-logo.svg">
+    <link rel="stylesheet" href="assets/site.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="site-body">
+    <div class="site-shell">
+        <nav class="max-w-7xl mx-auto px-6 py-6 flex flex-wrap gap-4 items-center justify-between">
+            <a href="index.html" data-rpc-link class="flex items-center gap-3">
+                <img src="assets/unified-logo.svg" alt="UniFied logo" class="h-12 w-12 rounded-2xl shadow-2xl shadow-blue-950/30">
+                <div>
+                    <div class="text-2xl font-black brand-wordmark">UNIFIED</div>
+                    <div class="eyebrow">Explorer</div>
+                </div>
+            </a>
+            <div class="flex flex-wrap items-center gap-3">
+                <div class="nav-links">
+                    <a href="index.html" data-rpc-link class="nav-link">Home</a>
+                    <a href="dashboard.html" data-rpc-link class="nav-link is-active">Explorer</a>
+                    <a href="search.html" data-rpc-link class="nav-link">Search</a>
+                    <a href="tasks.html" data-rpc-link class="nav-link">Task Studio</a>
+                    <a href="governance.html" data-rpc-link class="nav-link">Governance</a>
+                </div>
+                <div id="socketState" class="pill is-warn">Polling fallback</div>
+            </div>
+        </nav>
+
+        <main class="max-w-7xl mx-auto px-6 pb-24">
+            <section class="grid xl:grid-cols-[1.15fr_0.95fr] gap-6 mb-6">
+                <article class="glass-panel rounded-[2rem] p-8">
+                    <div class="eyebrow mb-3">Live Explorer</div>
+                    <h1 class="section-title text-5xl leading-[0.95] mb-4">Inspect the network in motion.</h1>
+                    <p class="text-slate-300 leading-8 max-w-3xl">
+                        This dashboard reads the UniFied node directly over RPC and upgrades to WebSocket live snapshots when available. Blocks, mempool, peers, and proofs update here without refreshing the page.
+                    </p>
+                </article>
+
+                <aside class="glass-panel rounded-[2rem] p-6">
+                    <div class="eyebrow mb-3">Connection</div>
+                    <div class="grid gap-3">
+                        <input id="rpcUrl" class="endpoint-input mono" placeholder="https://node.example/rpc">
+                        <div class="flex flex-wrap gap-3">
+                            <button id="connectButton" class="button-primary">Connect</button>
+                            <button id="refreshButton" class="button-secondary">Refresh</button>
+                        </div>
+                    </div>
+                    <div id="statusBanner" class="banner banner-info mt-5">Detecting a UniFied node endpoint...</div>
+                </aside>
+            </section>
+
+            <section class="grid sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Status</div>
+                    <div id="metricStatus" class="metric-value text-emerald-300">offline</div>
+                    <div class="metric-meta">node health</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Current Block</div>
+                    <button id="metricBlockButton" class="text-left">
+                        <div id="metricBlock" class="metric-value text-cyan-300">0</div>
+                    </button>
+                    <div class="metric-meta">click to inspect</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Network</div>
+                    <div id="metricNetwork" class="metric-value text-slate-100">Unknown</div>
+                    <div class="metric-meta">chain profile</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Connected Peers</div>
+                    <div id="metricPeers" class="metric-value text-blue-300">0</div>
+                    <div class="metric-meta">live reputation set</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Supply</div>
+                    <div id="metricSupply" class="metric-value text-slate-100">0.0000</div>
+                    <div class="metric-meta">configured mainnet supply</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Pending Search</div>
+                    <div id="metricSearch" class="metric-value text-slate-100">0</div>
+                    <div class="metric-meta">mempool tasks</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Frontier Tasks</div>
+                    <div id="metricFrontier" class="metric-value text-emerald-300">0</div>
+                    <div class="metric-meta">autonomous follow-on crawl</div>
+                </article>
+                <article class="glass-panel metric-card">
+                    <div class="metric-label">Quarantined</div>
+                    <div id="metricQuarantined" class="metric-value text-amber-300">0</div>
+                    <div class="metric-meta">failed or blocked tasks</div>
+                </article>
+            </section>
+
+            <section class="grid xl:grid-cols-[1.08fr_0.92fr_0.92fr] gap-6 mb-6">
+                <article class="glass-panel section-frame">
+                    <div class="flex justify-between items-end mb-4">
+                        <div>
+                            <div class="eyebrow mb-2">Recent Activity</div>
+                            <h2 class="section-title text-3xl">Transactions</h2>
+                        </div>
+                    </div>
+                    <div id="transactionsList" class="stack mb-6"></div>
+                    <div>
+                        <div class="eyebrow mb-2">Recent Proofs</div>
+                        <div id="proofsList" class="stack"></div>
+                    </div>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Mempool</div>
+                    <h2 class="section-title text-3xl mb-4">Search workload</h2>
+                    <div class="mb-5">
+                        <div class="eyebrow mb-2">Pending Search Tasks</div>
+                        <div id="pendingSearchList" class="stack"></div>
+                    </div>
+                    <div>
+                        <div class="eyebrow mb-2">Quarantined Tasks</div>
+                        <div id="quarantinedList" class="stack"></div>
+                    </div>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Inspector</div>
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="section-title text-3xl">Selected object</h2>
+                        <button id="clearInspectorButton" class="button-secondary">Clear</button>
+                    </div>
+                    <div id="inspector"></div>
+                </article>
+            </section>
+
+            <section class="grid xl:grid-cols-[1fr_1fr_0.9fr] gap-6">
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Lookup</div>
+                    <h2 class="section-title text-3xl mb-4">Address activity</h2>
+                    <form id="lookupForm" class="grid gap-3 mb-5">
+                        <input id="lookupInput" class="field" placeholder="UFI address or UNS name">
+                        <button class="button-primary" type="submit">Inspect address</button>
+                    </form>
+                    <div class="mb-5">
+                        <div class="eyebrow mb-2">Transactions</div>
+                        <div id="addressTransactionsList" class="stack"></div>
+                    </div>
+                    <div>
+                        <div class="eyebrow mb-2">Crawl Proofs</div>
+                        <div id="addressProofsList" class="stack"></div>
+                    </div>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Peers</div>
+                    <h2 class="section-title text-3xl mb-4">Reputation set</h2>
+                    <div id="peersList" class="stack"></div>
+                </article>
+
+                <article class="glass-panel section-frame">
+                    <div class="eyebrow mb-2">Network Details</div>
+                    <div id="networkDetails" class="grid gap-4 mb-5"></div>
+                    <div class="eyebrow mb-2">Governance Events</div>
+                    <div id="governanceList" class="stack">
+                        <div class="empty-state">Waiting for governance snapshots.</div>
+                    </div>
+                </article>
+            </section>
+        </main>
+    </div>
+
+    <script type="module" src="assets/dashboard.js"></script>
+</body>
+</html>

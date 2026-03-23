@@ -79,6 +79,7 @@ type Engine struct {
 type MempoolStatus struct {
 	PendingTransfers       int    `json:"pendingTransfers"`
 	PendingSearchTasks     int    `json:"pendingSearchTasks"`
+	PendingFrontierTasks   int    `json:"pendingFrontierTasks"`
 	QuarantinedSearchTasks int    `json:"quarantinedSearchTasks"`
 	TransferCapacity       int    `json:"transferCapacity"`
 	SearchTaskCapacity     int    `json:"searchTaskCapacity"`
@@ -86,6 +87,19 @@ type MempoolStatus struct {
 	MiningIntervalSec      int64  `json:"miningIntervalSec"`
 	MiningInFlight         bool   `json:"miningInFlight"`
 	MinerAddress           string `json:"minerAddress"`
+}
+
+type miningTaskSource string
+
+const (
+	miningTaskSourceMempool  miningTaskSource = "mempool"
+	miningTaskSourceFrontier miningTaskSource = "frontier"
+)
+
+type miningSearchTask struct {
+	source   miningTaskSource
+	envelope SearchTaskEnvelope
+	record   SearchTaskRecord
 }
 
 type PendingSearchTask struct {
@@ -597,6 +611,10 @@ func (e *Engine) MempoolStatus() MempoolStatus {
 	if taskSenderLimit > senderLimit {
 		senderLimit = taskSenderLimit
 	}
+	frontierPending := 0
+	if e != nil && e.Blockchain != nil {
+		_, frontierPending = e.Blockchain.PendingSearchTaskSummary()
+	}
 
 	e.mu.Lock()
 	inFlight := e.inFlight
@@ -606,6 +624,7 @@ func (e *Engine) MempoolStatus() MempoolStatus {
 	return MempoolStatus{
 		PendingTransfers:       txPending,
 		PendingSearchTasks:     taskPending,
+		PendingFrontierTasks:   frontierPending,
 		QuarantinedSearchTasks: quarantined,
 		TransferCapacity:       txCapacity,
 		SearchTaskCapacity:     taskCapacity,
@@ -750,20 +769,24 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 
 	transactions := e.TxPool.Drain(256)
 	taskEnvelopes := e.TaskPool.DrainHighestValue(8)
-	if len(transactions) == 0 && len(taskEnvelopes) == 0 {
+	workItems := wrapMempoolSearchTasks(taskEnvelopes)
+	frontierTasks := e.frontierMiningTasks(8 - len(workItems))
+	workItems = append(workItems, frontierTasks...)
+	if len(transactions) == 0 && len(workItems) == 0 {
 		return Block{}, nil
 	}
 	if e.Logger != nil {
 		e.Logger.Printf(
-			"mining tick: drained transfers=%d searchTasks=%d",
+			"mining tick: drained transfers=%d mempoolSearchTasks=%d frontierSearchTasks=%d",
 			len(transactions),
 			len(taskEnvelopes),
+			len(frontierTasks),
 		)
 	}
 	e.setInFlightWork(transactions, taskEnvelopes)
 	defer e.clearInFlightWork()
 
-	crawlProofs := make([]CrawlProof, 0, len(taskEnvelopes))
+	crawlProofs := make([]CrawlProof, 0, len(workItems))
 	taskTransactions := make([]Transaction, 0, len(taskEnvelopes))
 	minedTaskEnvelopes := make([]SearchTaskEnvelope, 0, len(taskEnvelopes))
 	failed := make([]SearchTaskEnvelope, 0)
@@ -771,15 +794,18 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 	quarantineReasons := make(map[string]string)
 	quarantineFailureCounts := make(map[string]int)
 
-	for _, envelope := range taskEnvelopes {
-		if cutoff, ok := quarantineCutoffs[envelope.Transaction.From]; ok && envelope.Transaction.Nonce >= cutoff {
-			e.recordQuarantinedTask(
-				envelope,
-				quarantineFailureCounts[envelope.Transaction.From],
-				fmt.Sprintf("blocked by quarantined nonce %d: %s", cutoff, quarantineReasons[envelope.Transaction.From]),
-				true,
-			)
-			continue
+	for _, workItem := range workItems {
+		envelope := workItem.envelope
+		if workItem.source == miningTaskSourceMempool {
+			if cutoff, ok := quarantineCutoffs[envelope.Transaction.From]; ok && envelope.Transaction.Nonce >= cutoff {
+				e.recordQuarantinedTask(
+					envelope,
+					quarantineFailureCounts[envelope.Transaction.From],
+					fmt.Sprintf("blocked by quarantined nonce %d: %s", cutoff, quarantineReasons[envelope.Transaction.From]),
+					true,
+				)
+				continue
+			}
 		}
 		mineCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 		result, err := e.Miner.Mine(mineCtx, envelope.Task)
@@ -802,27 +828,40 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 				}
 				e.recordQuarantinedTask(envelope, failure.Count, reason, terminal)
 				e.clearTaskFailure(envelope.Transaction.Hash)
-				sender := envelope.Transaction.From
-				cutoff, exists := quarantineCutoffs[sender]
-				if !exists || envelope.Transaction.Nonce < cutoff {
-					quarantineCutoffs[sender] = envelope.Transaction.Nonce
-					quarantineReasons[sender] = reason
-					quarantineFailureCounts[sender] = failure.Count
+				if workItem.source == miningTaskSourceMempool {
+					sender := envelope.Transaction.From
+					cutoff, exists := quarantineCutoffs[sender]
+					if !exists || envelope.Transaction.Nonce < cutoff {
+						quarantineCutoffs[sender] = envelope.Transaction.Nonce
+						quarantineReasons[sender] = reason
+						quarantineFailureCounts[sender] = failure.Count
+					}
 				}
 				continue
 			}
-			failed = append(failed, envelope)
+			if workItem.source == miningTaskSourceMempool {
+				failed = append(failed, envelope)
+			}
 			continue
 		}
 		e.clearTaskFailure(envelope.Transaction.Hash)
 
-		value, _ := envelope.Transaction.ValueBig()
-		architectFee := constants.ArchitectFee(value)
-		minerReward := new(big.Int).Sub(cloneBigInt(value), architectFee)
+		value, _ := new(big.Int).SetString(strings.TrimSpace(workItem.record.GrossBounty), 10)
+		if value == nil {
+			value = big.NewInt(0)
+		}
+		architectFee, _ := new(big.Int).SetString(strings.TrimSpace(workItem.record.ArchitectFee), 10)
+		if architectFee == nil {
+			architectFee = constants.ArchitectFee(value)
+		}
+		minerReward, _ := new(big.Int).SetString(strings.TrimSpace(workItem.record.MinerReward), 10)
+		if minerReward == nil {
+			minerReward = new(big.Int).Sub(cloneBigInt(value), cloneBigInt(architectFee))
+		}
 		crawlProofs = append(crawlProofs, CrawlProof{
-			TaskID:       envelope.Transaction.Hash,
-			TaskTxHash:   envelope.Transaction.Hash,
-			Query:        envelope.Request.Query,
+			TaskID:       workItem.record.ID,
+			TaskTxHash:   firstNonEmptyString(workItem.record.TxHash, workItem.record.ID),
+			Query:        workItem.record.Query,
 			URL:          result.URL,
 			Miner:        e.MinerAddress,
 			Page:         result.Page,
@@ -832,8 +871,10 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 			MinerReward:  minerReward.String(),
 			CreatedAt:    result.CompletedAt,
 		})
-		taskTransactions = append(taskTransactions, envelope.Transaction)
-		minedTaskEnvelopes = append(minedTaskEnvelopes, envelope)
+		if workItem.source == miningTaskSourceMempool {
+			taskTransactions = append(taskTransactions, envelope.Transaction)
+			minedTaskEnvelopes = append(minedTaskEnvelopes, envelope)
+		}
 	}
 
 	if len(quarantineCutoffs) > 0 {
@@ -1126,6 +1167,129 @@ func cloneCrawlTask(task consensus.CrawlTask) consensus.CrawlTask {
 	cloned.ArchitectFee = cloneBigInt(task.ArchitectFee)
 	cloned.MinerReward = cloneBigInt(task.MinerReward)
 	return cloned
+}
+
+func wrapMempoolSearchTasks(items []SearchTaskEnvelope) []miningSearchTask {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]miningSearchTask, 0, len(items))
+	for _, item := range items {
+		out = append(out, miningSearchTask{
+			source:   miningTaskSourceMempool,
+			envelope: item,
+			record:   searchTaskRecordFromEnvelope(item),
+		})
+	}
+	return out
+}
+
+func (e *Engine) frontierMiningTasks(limit int) []miningSearchTask {
+	if e == nil || e.Blockchain == nil || limit <= 0 {
+		return nil
+	}
+
+	quarantined := e.quarantinedTaskIDs()
+	records := e.Blockchain.PendingSearchTaskRecords(0)
+	out := make([]miningSearchTask, 0, limit)
+	for _, record := range records {
+		if _, blocked := quarantined[record.ID]; blocked {
+			continue
+		}
+		envelope, err := searchTaskEnvelopeFromRecord(record)
+		if err != nil {
+			if e.Logger != nil {
+				e.Logger.Printf("frontier task skipped id=%s url=%s: %v", record.ID, record.URL, err)
+			}
+			continue
+		}
+		out = append(out, miningSearchTask{
+			source:   miningTaskSourceFrontier,
+			envelope: envelope,
+			record:   record,
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func (e *Engine) quarantinedTaskIDs() map[string]struct{} {
+	if e == nil {
+		return nil
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	blocked := make(map[string]struct{}, len(e.quarantinedTasks))
+	for _, item := range e.quarantinedTasks {
+		if hash := strings.TrimSpace(item.Transaction.Hash); hash != "" {
+			blocked[hash] = struct{}{}
+		}
+	}
+	return blocked
+}
+
+func searchTaskRecordFromEnvelope(envelope SearchTaskEnvelope) SearchTaskRecord {
+	architectFee := cloneBigInt(envelope.Task.ArchitectFee)
+	minerReward := cloneBigInt(envelope.Task.MinerReward)
+	if architectFee.Sign() == 0 || minerReward.Sign() == 0 {
+		value, _ := envelope.Transaction.ValueBig()
+		if value == nil {
+			value = big.NewInt(0)
+		}
+		architectFee = constants.ArchitectFee(value)
+		minerReward = new(big.Int).Sub(cloneBigInt(value), cloneBigInt(architectFee))
+	}
+	return SearchTaskRecord{
+		ID:              firstNonEmptyString(envelope.Task.ID, envelope.Transaction.Hash),
+		TxHash:          envelope.Transaction.Hash,
+		Submitter:       envelope.Transaction.From,
+		Query:           envelope.Request.Query,
+		URL:             envelope.Request.URL,
+		BaseBounty:      envelope.Request.BaseBounty,
+		GrossBounty:     envelope.Transaction.Value,
+		ArchitectFee:    architectFee.String(),
+		MinerReward:     minerReward.String(),
+		Difficulty:      envelope.Task.AdjustedDifficulty,
+		DataVolumeBytes: envelope.Request.DataVolumeBytes,
+		CreatedAt:       envelope.Task.CreatedAt,
+	}
+}
+
+func searchTaskEnvelopeFromRecord(record SearchTaskRecord) (SearchTaskEnvelope, error) {
+	task, err := crawlTaskFromRecord(record)
+	if err != nil {
+		return SearchTaskEnvelope{}, err
+	}
+	return SearchTaskEnvelope{
+		Transaction: Transaction{
+			Hash:      firstNonEmptyString(record.ID, record.TxHash),
+			Type:      TxTypeSearchTask,
+			From:      record.Submitter,
+			Value:     record.GrossBounty,
+			Timestamp: record.CreatedAt,
+		},
+		Request: SearchTaskRequest{
+			Query:           record.Query,
+			URL:             record.URL,
+			BaseBounty:      record.BaseBounty,
+			Difficulty:      record.Difficulty,
+			DataVolumeBytes: record.DataVolumeBytes,
+		},
+		Task: task,
+	}, nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func classifySearchTaskFailure(err error) (bool, string) {
