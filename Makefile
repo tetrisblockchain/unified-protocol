@@ -17,7 +17,7 @@ NETWORK_CONFIG ?=
 NETWORK_NAME ?=
 CHAIN_ID ?=
 ARCHITECT_ADDRESS ?=
-GENESIS_ADDRESS ?= UFI_LOCAL_OPERATOR
+GENESIS_ADDRESS ?=
 OPERATOR ?= UFI_LOCAL_OPERATOR
 OPERATOR_ALIAS ?= local-operator
 OPERATOR_VOTING_POWER ?= 5000
@@ -57,6 +57,8 @@ RELEASE_INCLUDE_DESKTOP ?= 1
 RELEASE_INCLUDE_DESKTOP_NODE_MODULES ?= 0
 RELEASE_INCLUDE_WEBSITE ?= 1
 RELEASE_INCLUDE_CONTRACTS ?= 1
+
+CHAIN_ID_FLAG := $(if $(strip $(CHAIN_ID)),--chain-id "$(CHAIN_ID)",)
 
 .PHONY: setup tidy fmt test build build-node build-cli desktop-install desktop-dev desktop-build desktop-start install-go-linux install-seed-node install-seed-node-macos install-backup-rotation configure-firewall-linux generate-operator generate-network-config verify-network-config print-cutover-commands package-mainnet-release run-node run-mine genesis bootstrap-architect seed-urls check-node backup-datadir restore-datadir rollout-node solc-uns smoke-health smoke-rpc clean
 
@@ -125,7 +127,7 @@ generate-network-config:
 	$(GO) run ./scripts/generate_network_config \
 		--output "$(NETWORK_CONFIG)" \
 		--name "$(NETWORK_NAME)" \
-		--chain-id "$(CHAIN_ID)" \
+		$(CHAIN_ID_FLAG) \
 		--genesis-address "$(GENESIS_ADDRESS)" \
 		--architect-address "$(ARCHITECT_ADDRESS)" \
 		--circulating-supply "$(CIRCULATING_SUPPLY)" \
@@ -171,7 +173,7 @@ run-node:
 	$(GO) run ./cmd/unified-node \
 		--network-config "$(NETWORK_CONFIG)" \
 		--network-name "$(NETWORK_NAME)" \
-		--chain-id "$(CHAIN_ID)" \
+		$(CHAIN_ID_FLAG) \
 		--datadir "$(DATADIR)" \
 		--rpchost "$(RPCHOST)" \
 		--rpcport "$(RPCPORT)" \
@@ -189,7 +191,7 @@ run-mine:
 		--mine \
 		--network-config "$(NETWORK_CONFIG)" \
 		--network-name "$(NETWORK_NAME)" \
-		--chain-id "$(CHAIN_ID)" \
+		$(CHAIN_ID_FLAG) \
 		--datadir "$(DATADIR)" \
 		--rpchost "$(RPCHOST)" \
 		--rpcport "$(RPCPORT)" \
@@ -261,7 +263,7 @@ rollout-node:
 	./scripts/ops/rollout_node.sh \
 		--network-config "$(NETWORK_CONFIG)" \
 		--network-name "$(NETWORK_NAME)" \
-		--chain-id "$(CHAIN_ID)" \
+		$(CHAIN_ID_FLAG) \
 		--datadir "$(DATADIR)" \
 		--rpchost "$(RPCHOST)" \
 		--rpcport "$(RPCPORT)" \

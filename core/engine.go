@@ -25,6 +25,10 @@ const (
 	DefaultReplacementBumpBPS = 11000
 	DefaultTaskFailureLimit   = 3
 	DefaultQuarantineLimit    = 256
+	DefaultMineConcurrency    = 4
+	DefaultMempoolTaskBatch   = 8
+	DefaultFrontierTaskBatch  = 8
+	DefaultTaskTimeout        = 12 * time.Second
 )
 
 var (
@@ -56,15 +60,20 @@ type TaskPool struct {
 }
 
 type Engine struct {
-	Blockchain     *Blockchain
-	TxPool         *TxPool
-	TaskPool       *TaskPool
-	Miner          consensus.Miner
-	MinerAddress   string
-	Logger         *log.Logger
-	MiningInterval time.Duration
-	PublishBlock   func(context.Context, Block) error
-	PublishTx      func(context.Context, Transaction) error
+	Blockchain        *Blockchain
+	TxPool            *TxPool
+	TaskPool          *TaskPool
+	Miner             consensus.Miner
+	MinerAddress      string
+	Logger            *log.Logger
+	MiningInterval    time.Duration
+	MineConcurrency   int
+	MempoolTaskBatch  int
+	FrontierTaskBatch int
+	TaskTimeout       time.Duration
+	Partitioner       *PeerTaskPartitioner
+	PublishBlock      func(context.Context, Block) error
+	PublishTx         func(context.Context, Transaction) error
 
 	submitMu sync.Mutex
 	mu       sync.Mutex
@@ -74,6 +83,7 @@ type Engine struct {
 	inFlightTasks     []SearchTaskEnvelope
 	taskFailures      map[string]SearchTaskFailure
 	quarantinedTasks  []QuarantinedSearchTask
+	lastMiningStatus  MiningStatus
 }
 
 type MempoolStatus struct {
@@ -87,6 +97,11 @@ type MempoolStatus struct {
 	MiningIntervalSec      int64  `json:"miningIntervalSec"`
 	MiningInFlight         bool   `json:"miningInFlight"`
 	MinerAddress           string `json:"minerAddress"`
+	PartitionEnabled       bool   `json:"partitionEnabled"`
+	PartitionWorkerCount   int    `json:"partitionWorkerCount"`
+	LastEvaluatedTasks     int    `json:"lastEvaluatedTasks"`
+	LastOwnedTasks         int    `json:"lastOwnedTasks"`
+	LastSkippedTasks       int    `json:"lastSkippedTasks"`
 }
 
 type miningTaskSource string
@@ -100,6 +115,15 @@ type miningSearchTask struct {
 	source   miningTaskSource
 	envelope SearchTaskEnvelope
 	record   SearchTaskRecord
+}
+
+type miningSearchTaskOutcome struct {
+	index         int
+	workItem      miningSearchTask
+	result        consensus.MiningResult
+	err           error
+	blockedSender bool
+	blockedReason string
 }
 
 type PendingSearchTask struct {
@@ -155,14 +179,18 @@ func NewEngine(blockchain *Blockchain, miner consensus.Miner, minerAddress strin
 		logger = log.Default()
 	}
 	return &Engine{
-		Blockchain:     blockchain,
-		TxPool:         NewTxPool(),
-		TaskPool:       NewTaskPool(),
-		Miner:          miner,
-		MinerAddress:   minerAddress,
-		Logger:         logger,
-		MiningInterval: DefaultMiningInterval,
-		taskFailures:   make(map[string]SearchTaskFailure),
+		Blockchain:        blockchain,
+		TxPool:            NewTxPool(),
+		TaskPool:          NewTaskPool(),
+		Miner:             miner,
+		MinerAddress:      minerAddress,
+		Logger:            logger,
+		MiningInterval:    DefaultMiningInterval,
+		MineConcurrency:   DefaultMineConcurrency,
+		MempoolTaskBatch:  DefaultMempoolTaskBatch,
+		FrontierTaskBatch: DefaultFrontierTaskBatch,
+		TaskTimeout:       DefaultTaskTimeout,
+		taskFailures:      make(map[string]SearchTaskFailure),
 	}
 }
 
@@ -619,6 +647,7 @@ func (e *Engine) MempoolStatus() MempoolStatus {
 	e.mu.Lock()
 	inFlight := e.inFlight
 	quarantined := len(e.quarantinedTasks)
+	miningStatus := e.lastMiningStatus
 	e.mu.Unlock()
 
 	return MempoolStatus{
@@ -632,7 +661,27 @@ func (e *Engine) MempoolStatus() MempoolStatus {
 		MiningIntervalSec:      int64(e.MiningInterval / time.Second),
 		MiningInFlight:         inFlight,
 		MinerAddress:           e.MinerAddress,
+		PartitionEnabled:       miningStatus.PartitionEnabled,
+		PartitionWorkerCount:   miningStatus.PartitionWorkerCount,
+		LastEvaluatedTasks:     miningStatus.LastEvaluatedSearchTasks,
+		LastOwnedTasks:         miningStatus.LastOwnedSearchTasks,
+		LastSkippedTasks:       miningStatus.LastSkippedSearchTasks,
 	}
+}
+
+func (e *Engine) MiningStatus() MiningStatus {
+	if e == nil {
+		return MiningStatus{}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	snapshot := e.lastMiningStatus
+	snapshot.PartitionWorkers = append([]string(nil), e.lastMiningStatus.PartitionWorkers...)
+	if snapshot.MinerAddress == "" {
+		snapshot.MinerAddress = e.MinerAddress
+	}
+	return snapshot
 }
 
 func (e *Engine) PendingTransactions(sender string, limit int) []Transaction {
@@ -768,10 +817,61 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 	}
 
 	transactions := e.TxPool.Drain(256)
-	taskEnvelopes := e.TaskPool.DrainHighestValue(8)
+	mempoolBatch := e.MempoolTaskBatch
+	if mempoolBatch <= 0 {
+		mempoolBatch = DefaultMempoolTaskBatch
+	}
+	frontierBatch := e.FrontierTaskBatch
+	if frontierBatch <= 0 {
+		frontierBatch = DefaultFrontierTaskBatch
+	}
+
+	taskEnvelopes := e.TaskPool.DrainHighestValue(mempoolBatch)
 	workItems := wrapMempoolSearchTasks(taskEnvelopes)
-	frontierTasks := e.frontierMiningTasks(8 - len(workItems))
+	frontierTasks := e.frontierMiningTasks(frontierBatch)
 	workItems = append(workItems, frontierTasks...)
+	ownedTaskEnvelopes := append([]SearchTaskEnvelope(nil), taskEnvelopes...)
+	miningStatus := MiningStatus{
+		MinerAddress:             e.MinerAddress,
+		LastEvaluatedSearchTasks: len(workItems),
+		LastOwnedSearchTasks:     len(workItems),
+		LastOwnedMempoolTasks:    len(taskEnvelopes),
+		LastOwnedFrontierTasks:   len(frontierTasks),
+		UpdatedAt:                time.Now().UTC(),
+	}
+	if e.Partitioner != nil {
+		var partitioned MiningStatus
+		var skipped []miningSearchTask
+		workItems, skipped, partitioned = e.Partitioner.FilterWorkItems(workItems)
+		partitioned.MinerAddress = e.MinerAddress
+		miningStatus = partitioned
+		ownedTaskEnvelopes = ownedTaskEnvelopes[:0]
+		skippedTaskEnvelopes := make([]SearchTaskEnvelope, 0, len(skipped))
+		for _, item := range workItems {
+			if item.source == miningTaskSourceMempool {
+				ownedTaskEnvelopes = append(ownedTaskEnvelopes, item.envelope)
+			}
+		}
+		for _, item := range skipped {
+			if item.source == miningTaskSourceMempool {
+				skippedTaskEnvelopes = append(skippedTaskEnvelopes, item.envelope)
+			}
+		}
+		if len(skippedTaskEnvelopes) > 0 {
+			e.TaskPool.Requeue(skippedTaskEnvelopes)
+		}
+		if e.Logger != nil && partitioned.LastSkippedSearchTasks > 0 {
+			e.Logger.Printf(
+				"mining tick: partition evaluated=%d owned=%d skipped=%d workers=%d local=%s",
+				partitioned.LastEvaluatedSearchTasks,
+				partitioned.LastOwnedSearchTasks,
+				partitioned.LastSkippedSearchTasks,
+				partitioned.PartitionWorkerCount,
+				partitioned.PartitionLocalWorker,
+			)
+		}
+	}
+	e.recordMiningStatus(miningStatus)
 	if len(transactions) == 0 && len(workItems) == 0 {
 		return Block{}, nil
 	}
@@ -783,35 +883,39 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 			len(frontierTasks),
 		)
 	}
-	e.setInFlightWork(transactions, taskEnvelopes)
+	e.setInFlightWork(transactions, ownedTaskEnvelopes)
 	defer e.clearInFlightWork()
 
 	crawlProofs := make([]CrawlProof, 0, len(workItems))
 	taskTransactions := make([]Transaction, 0, len(taskEnvelopes))
-	minedTaskEnvelopes := make([]SearchTaskEnvelope, 0, len(taskEnvelopes))
+	minedTaskEnvelopes := make([]SearchTaskEnvelope, 0, len(ownedTaskEnvelopes))
 	failed := make([]SearchTaskEnvelope, 0)
 	quarantineCutoffs := make(map[string]uint64)
 	quarantineReasons := make(map[string]string)
 	quarantineFailureCounts := make(map[string]int)
-
-	for _, workItem := range workItems {
+	blockedRequeues := 0
+	for _, outcome := range e.mineSearchTasks(ctx, workItems) {
+		workItem := outcome.workItem
 		envelope := workItem.envelope
-		if workItem.source == miningTaskSourceMempool {
-			if cutoff, ok := quarantineCutoffs[envelope.Transaction.From]; ok && envelope.Transaction.Nonce >= cutoff {
-				e.recordQuarantinedTask(
-					envelope,
-					quarantineFailureCounts[envelope.Transaction.From],
-					fmt.Sprintf("blocked by quarantined nonce %d: %s", cutoff, quarantineReasons[envelope.Transaction.From]),
-					true,
-				)
-				continue
+		if outcome.blockedSender {
+			if workItem.source == miningTaskSourceMempool {
+				sender := envelope.Transaction.From
+				if cutoff, ok := quarantineCutoffs[sender]; ok && envelope.Transaction.Nonce >= cutoff {
+					e.recordQuarantinedTask(
+						envelope,
+						quarantineFailureCounts[sender],
+						fmt.Sprintf("blocked by quarantined nonce %d: %s", cutoff, quarantineReasons[sender]),
+						true,
+					)
+				} else {
+					failed = append(failed, envelope)
+					blockedRequeues++
+				}
 			}
+			continue
 		}
-		mineCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-		result, err := e.Miner.Mine(mineCtx, envelope.Task)
-		cancel()
-		if err != nil {
-			terminal, reason := classifySearchTaskFailure(err)
+		if outcome.err != nil {
+			terminal, reason := classifySearchTaskFailure(outcome.err)
 			failure := e.recordTaskFailure(envelope.Transaction.Hash, reason)
 			if e.Logger != nil {
 				e.Logger.Printf(
@@ -819,7 +923,7 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 					envelope.Transaction.Hash,
 					envelope.Transaction.Nonce,
 					envelope.Request.URL,
-					err,
+					outcome.err,
 				)
 			}
 			if terminal || failure.Count >= DefaultTaskFailureLimit {
@@ -846,6 +950,7 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 		}
 		e.clearTaskFailure(envelope.Transaction.Hash)
 
+		result := outcome.result
 		value, _ := new(big.Int).SetString(strings.TrimSpace(workItem.record.GrossBounty), 10)
 		if value == nil {
 			value = big.NewInt(0)
@@ -907,6 +1012,9 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 			e.Logger.Printf("mining tick: requeued failed search tasks=%d", len(failed))
 		}
 	}
+	if blockedRequeues > 0 && e.Logger != nil {
+		e.Logger.Printf("mining tick: requeued sender-blocked search tasks=%d", blockedRequeues)
+	}
 	e.setInFlightWork(transactions, minedTaskEnvelopes)
 
 	blockTransactions := append(transactions, taskTransactions...)
@@ -926,6 +1034,93 @@ func (e *Engine) MineOnce(ctx context.Context) (Block, error) {
 	return block, nil
 }
 
+func (e *Engine) mineSearchTasks(ctx context.Context, workItems []miningSearchTask) []miningSearchTaskOutcome {
+	if len(workItems) == 0 {
+		return nil
+	}
+
+	type indexedWorkItem struct {
+		index    int
+		workItem miningSearchTask
+	}
+
+	lanesByKey := make(map[string][]indexedWorkItem)
+	laneOrder := make([]string, 0, len(workItems))
+	for index, workItem := range workItems {
+		key := miningLaneKey(workItem)
+		if _, ok := lanesByKey[key]; !ok {
+			laneOrder = append(laneOrder, key)
+		}
+		lanesByKey[key] = append(lanesByKey[key], indexedWorkItem{
+			index:    index,
+			workItem: workItem,
+		})
+	}
+
+	lanes := make([][]indexedWorkItem, 0, len(laneOrder))
+	for _, key := range laneOrder {
+		lanes = append(lanes, lanesByKey[key])
+	}
+
+	workerCount := e.MineConcurrency
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	if workerCount > len(lanes) {
+		workerCount = len(lanes)
+	}
+
+	outcomes := make([]miningSearchTaskOutcome, len(workItems))
+	jobs := make(chan []indexedWorkItem)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workerCount; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for lane := range jobs {
+				blockLaterMempoolTasks := false
+				blockedReason := ""
+				for _, job := range lane {
+					if blockLaterMempoolTasks {
+						outcomes[job.index] = miningSearchTaskOutcome{
+							index:         job.index,
+							workItem:      job.workItem,
+							blockedSender: true,
+							blockedReason: blockedReason,
+						}
+						continue
+					}
+
+					timeout := e.TaskTimeout
+					if timeout <= 0 {
+						timeout = DefaultTaskTimeout
+					}
+					mineCtx, cancel := context.WithTimeout(ctx, timeout)
+					result, err := e.Miner.Mine(mineCtx, job.workItem.envelope.Task)
+					cancel()
+					outcomes[job.index] = miningSearchTaskOutcome{
+						index:    job.index,
+						workItem: job.workItem,
+						result:   result,
+						err:      err,
+					}
+					if err != nil && job.workItem.source == miningTaskSourceMempool {
+						blockLaterMempoolTasks = true
+						blockedReason = fmt.Sprintf("blocked by failed sender nonce %d", job.workItem.envelope.Transaction.Nonce)
+					}
+				}
+			}
+		}()
+	}
+
+	for _, lane := range lanes {
+		jobs <- lane
+	}
+	close(jobs)
+	wg.Wait()
+	return outcomes
+}
+
 func (e *Engine) publishTransaction(tx Transaction, propagate bool) {
 	if !propagate || e == nil || e.PublishTx == nil {
 		return
@@ -935,6 +1130,15 @@ func (e *Engine) publishTransaction(tx Transaction, propagate bool) {
 	if err := e.PublishTx(ctx, tx); err != nil && e.Logger != nil {
 		e.Logger.Printf("transaction publish failed tx=%s: %v", tx.Hash, err)
 	}
+}
+
+func (e *Engine) recordMiningStatus(status MiningStatus) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.lastMiningStatus = status
 }
 
 func (e *Engine) validatePendingTransaction(tx Transaction) error {
@@ -1182,6 +1386,13 @@ func wrapMempoolSearchTasks(items []SearchTaskEnvelope) []miningSearchTask {
 		})
 	}
 	return out
+}
+
+func miningLaneKey(item miningSearchTask) string {
+	if item.source == miningTaskSourceMempool {
+		return "mempool:" + strings.TrimSpace(item.envelope.Transaction.From)
+	}
+	return "frontier:" + firstNonEmptyString(item.record.ID, item.envelope.Transaction.Hash, item.record.URL)
 }
 
 func (e *Engine) frontierMiningTasks(limit int) []miningSearchTask {

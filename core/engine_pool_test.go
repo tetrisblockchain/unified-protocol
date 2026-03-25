@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +27,56 @@ func (s stubCrawler) Index(ctx context.Context, task consensus.CrawlTask, target
 		return consensus.IndexedPage{}, errors.New("stub crawler is not configured")
 	}
 	return s.index(ctx, task, targetURL)
+}
+
+func addSignedSearchTaskToPool(t *testing.T, engine *Engine, privateKey ed25519.PrivateKey, from string, nonce uint64, request SearchTaskRequest) SearchTaskEnvelope {
+	t.Helper()
+
+	envelope := makeSignedSearchTaskEnvelope(t, engine, privateKey, from, nonce, request)
+	if err := engine.TaskPool.Add(envelope); err != nil {
+		t.Fatalf("TaskPool.Add returned error: %v", err)
+	}
+	return envelope
+}
+
+func makeSignedSearchTaskEnvelope(t *testing.T, engine *Engine, privateKey ed25519.PrivateKey, from string, nonce uint64, request SearchTaskRequest) SearchTaskEnvelope {
+	t.Helper()
+	return makeSignedSearchTaskEnvelopeWithRegistry(t, engine.Miner.PriorityRegistry, privateKey, from, nonce, request)
+}
+
+func makeSignedSearchTaskEnvelopeWithRegistry(t *testing.T, registry *consensus.PriorityRegistry, privateKey ed25519.PrivateKey, from string, nonce uint64, request SearchTaskRequest) SearchTaskEnvelope {
+	t.Helper()
+
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("Marshal returned error: %v", err)
+	}
+
+	baseBounty, ok := new(big.Int).SetString(request.BaseBounty, 10)
+	if !ok {
+		t.Fatalf("invalid base bounty %q", request.BaseBounty)
+	}
+	totalValue, err := consensus.QuoteBounty(baseBounty, request.Difficulty, request.DataVolumeBytes)
+	if err != nil {
+		t.Fatalf("QuoteBounty returned error: %v", err)
+	}
+
+	tx := Transaction{
+		Type:  TxTypeSearchTask,
+		From:  from,
+		Value: totalValue.String(),
+		Nonce: nonce,
+		Data:  payload,
+	}
+	if err := tx.Sign(privateKey); err != nil {
+		t.Fatalf("Sign returned error: %v", err)
+	}
+
+	envelope, err := BuildSearchTaskEnvelope(tx, request, registry)
+	if err != nil {
+		t.Fatalf("BuildSearchTaskEnvelope returned error: %v", err)
+	}
+	return envelope
 }
 
 func TestTxPoolReplacementRequiresPriceBump(t *testing.T) {
@@ -84,6 +135,113 @@ func TestTaskPoolEnforcesSenderAndGlobalLimits(t *testing.T) {
 	secondSender := SearchTaskEnvelope{Transaction: Transaction{Hash: "task-3", From: "UFI_B", Value: "100", Nonce: 0}}
 	if err := globallyLimited.Add(secondSender); !errors.Is(err, ErrPoolFull) {
 		t.Fatalf("Add globally-limited second task error = %v, want ErrPoolFull", err)
+	}
+}
+
+func TestMineOnceSkipsUnownedPartitionedTasks(t *testing.T) {
+	t.Parallel()
+
+	registry := consensus.NewPriorityRegistry()
+	minedByURL := make(map[string]int)
+	engine := NewEngine(nil, consensus.Miner{
+		ID: "UFI_TEST_MINER",
+		Crawler: stubCrawler{index: func(ctx context.Context, task consensus.CrawlTask, targetURL string) (consensus.IndexedPage, error) {
+			minedByURL[targetURL]++
+			return consensus.IndexedPage{
+				URL:         targetURL,
+				Title:       "partitioned crawl",
+				Body:        "partitioned crawl body",
+				Snippet:     "partitioned crawl body",
+				ContentHash: "hash-" + targetURL,
+				SimHash:     consensus.SimHash(targetURL),
+			}, nil
+		}},
+		PriorityRegistry: registry,
+	}, "UFI_TEST_MINER", nil)
+
+	partitioner := NewPeerTaskPartitioner("peer-a", func() []string {
+		return []string{"peer-a", "peer-b"}
+	})
+	engine.Partitioner = partitioner
+
+	var ownedEnvelope SearchTaskEnvelope
+	var skippedEnvelope SearchTaskEnvelope
+	genesisBalances := make(map[string]*big.Int)
+	for index := 0; index < 64 && (ownedEnvelope.Transaction.Hash == "" || skippedEnvelope.Transaction.Hash == ""); index++ {
+		publicKey, privateKey, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatalf("GenerateKey returned error: %v", err)
+		}
+		sender, err := types.NewAddressFromPubKey(publicKey)
+		if err != nil {
+			t.Fatalf("NewAddressFromPubKey returned error: %v", err)
+		}
+		candidate := makeSignedSearchTaskEnvelopeWithRegistry(t, registry, privateKey, sender.String(), 0, SearchTaskRequest{
+			Query:           "partitioned task",
+			URL:             fmt.Sprintf("https://example.com/task/%d", index),
+			BaseBounty:      "100",
+			Difficulty:      1,
+			DataVolumeBytes: 10,
+		})
+		owner := partitionOwnerForTask(partitioner.workerIDs(), wrapMempoolSearchTasks([]SearchTaskEnvelope{candidate})[0])
+		switch {
+		case owner == "peer-a" && ownedEnvelope.Transaction.Hash == "":
+			ownedEnvelope = candidate
+			genesisBalances[sender.String()] = big.NewInt(1_000_000)
+		case owner != "peer-a" && skippedEnvelope.Transaction.Hash == "":
+			skippedEnvelope = candidate
+			genesisBalances[sender.String()] = big.NewInt(1_000_000)
+		}
+	}
+	if ownedEnvelope.Transaction.Hash == "" || skippedEnvelope.Transaction.Hash == "" {
+		t.Fatal("failed to find both owned and skipped envelopes")
+	}
+
+	chain := openTestChain(t, filepath.Join(t.TempDir(), "chain"), genesisBalances)
+	defer chain.Close()
+	engine.Blockchain = chain
+
+	if err := engine.TaskPool.Add(ownedEnvelope); err != nil {
+		t.Fatalf("TaskPool.Add owned returned error: %v", err)
+	}
+	if err := engine.TaskPool.Add(skippedEnvelope); err != nil {
+		t.Fatalf("TaskPool.Add skipped returned error: %v", err)
+	}
+
+	block, err := engine.MineOnce(context.Background())
+	if err != nil {
+		t.Fatalf("MineOnce returned error: %v", err)
+	}
+	if len(block.Body.CrawlProofs) != 1 {
+		t.Fatalf("crawl proofs = %d, want 1", len(block.Body.CrawlProofs))
+	}
+	if got := block.Body.CrawlProofs[0].TaskID; got != ownedEnvelope.Task.ID {
+		t.Fatalf("mined task ID = %s, want %s", got, ownedEnvelope.Task.ID)
+	}
+	if got := minedByURL[skippedEnvelope.Request.URL]; got != 0 {
+		t.Fatalf("skipped URL mined %d times, want 0", got)
+	}
+
+	pending := engine.PendingSearchTasks("", 10)
+	if len(pending) != 1 {
+		t.Fatalf("pending search tasks = %d, want 1", len(pending))
+	}
+	if got := pending[0].Transaction.Hash; got != skippedEnvelope.Transaction.Hash {
+		t.Fatalf("pending task hash = %s, want %s", got, skippedEnvelope.Transaction.Hash)
+	}
+
+	status := engine.MiningStatus()
+	if !status.PartitionEnabled {
+		t.Fatal("PartitionEnabled = false, want true")
+	}
+	if status.LastEvaluatedSearchTasks != 2 {
+		t.Fatalf("LastEvaluatedSearchTasks = %d, want 2", status.LastEvaluatedSearchTasks)
+	}
+	if status.LastOwnedSearchTasks != 1 {
+		t.Fatalf("LastOwnedSearchTasks = %d, want 1", status.LastOwnedSearchTasks)
+	}
+	if status.LastSkippedSearchTasks != 1 {
+		t.Fatalf("LastSkippedSearchTasks = %d, want 1", status.LastSkippedSearchTasks)
 	}
 }
 
@@ -309,6 +467,182 @@ func TestPendingNonceIncludesInFlightSearchTasks(t *testing.T) {
 	}
 	if pendingNonce != 4 {
 		t.Fatalf("PendingNonce = %d, want 4", pendingNonce)
+	}
+}
+
+func TestMineOnceRunsIndependentSenderTasksConcurrently(t *testing.T) {
+	t.Parallel()
+
+	publicKeyA, privateKeyA, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey sender A returned error: %v", err)
+	}
+	senderA, err := types.NewAddressFromPubKey(publicKeyA)
+	if err != nil {
+		t.Fatalf("NewAddressFromPubKey sender A returned error: %v", err)
+	}
+	publicKeyB, privateKeyB, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey sender B returned error: %v", err)
+	}
+	senderB, err := types.NewAddressFromPubKey(publicKeyB)
+	if err != nil {
+		t.Fatalf("NewAddressFromPubKey sender B returned error: %v", err)
+	}
+
+	chain := openTestChain(t, filepath.Join(t.TempDir(), "chain"), map[string]*big.Int{
+		senderA.String(): big.NewInt(1_000_000),
+		senderB.String(): big.NewInt(1_000_000),
+	})
+	defer chain.Close()
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+
+	engine := NewEngine(chain, consensus.Miner{
+		Crawler: stubCrawler{index: func(_ context.Context, _ consensus.CrawlTask, targetURL string) (consensus.IndexedPage, error) {
+			started <- targetURL
+			<-release
+			return consensus.IndexedPage{
+				URL:         targetURL,
+				Title:       "ok",
+				Body:        "indexed body",
+				Snippet:     "indexed body",
+				ContentHash: "hash-" + targetURL,
+				SimHash:     99,
+				IndexedAt:   time.Now().UTC(),
+			}, nil
+		}},
+		PriorityRegistry: consensus.NewPriorityRegistry(),
+	}, "UFI_TEST_MINER", nil)
+	engine.MineConcurrency = 2
+	engine.MempoolTaskBatch = 2
+
+	addSignedSearchTaskToPool(t, engine, privateKeyA, senderA.String(), 0, SearchTaskRequest{
+		Query:           "parallel crawl",
+		URL:             "https://example.com/a",
+		BaseBounty:      "100",
+		Difficulty:      1,
+		DataVolumeBytes: 10,
+	})
+	addSignedSearchTaskToPool(t, engine, privateKeyB, senderB.String(), 0, SearchTaskRequest{
+		Query:           "parallel crawl",
+		URL:             "https://example.com/b",
+		BaseBounty:      "100",
+		Difficulty:      1,
+		DataVolumeBytes: 10,
+	})
+
+	type mineResult struct {
+		block Block
+		err   error
+	}
+	done := make(chan mineResult, 1)
+	go func() {
+		block, err := engine.MineOnce(t.Context())
+		done <- mineResult{block: block, err: err}
+	}()
+
+	seen := map[string]struct{}{}
+	timeout := time.After(2 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case target := <-started:
+			seen[target] = struct{}{}
+		case <-timeout:
+			t.Fatal("expected two independent sender tasks to start before either completed")
+		}
+	}
+
+	close(release)
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("MineOnce returned error: %v", result.err)
+	}
+	if result.block.Hash == "" {
+		t.Fatal("expected block hash after concurrent mining")
+	}
+	if len(result.block.Body.CrawlProofs) != 2 {
+		t.Fatalf("crawl proofs = %d, want 2", len(result.block.Body.CrawlProofs))
+	}
+}
+
+func TestMineOnceRequeuesLaterSenderTasksAfterRecoverableFailure(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey returned error: %v", err)
+	}
+	sender, err := types.NewAddressFromPubKey(publicKey)
+	if err != nil {
+		t.Fatalf("NewAddressFromPubKey returned error: %v", err)
+	}
+
+	chain := openTestChain(t, filepath.Join(t.TempDir(), "chain"), map[string]*big.Int{
+		sender.String(): big.NewInt(1_000_000),
+	})
+	defer chain.Close()
+
+	var (
+		mu       sync.Mutex
+		attempts []string
+	)
+	engine := NewEngine(chain, consensus.Miner{
+		Crawler: stubCrawler{index: func(_ context.Context, _ consensus.CrawlTask, targetURL string) (consensus.IndexedPage, error) {
+			mu.Lock()
+			attempts = append(attempts, targetURL)
+			mu.Unlock()
+			if strings.Contains(targetURL, "/0") {
+				return consensus.IndexedPage{}, errors.New("temporary upstream timeout")
+			}
+			return consensus.IndexedPage{
+				URL:         targetURL,
+				Title:       "ok",
+				Body:        "indexed body",
+				Snippet:     "indexed body",
+				ContentHash: "hash-" + targetURL,
+				SimHash:     101,
+				IndexedAt:   time.Now().UTC(),
+			}, nil
+		}},
+		PriorityRegistry: consensus.NewPriorityRegistry(),
+	}, "UFI_TEST_MINER", nil)
+	engine.MineConcurrency = 4
+	engine.MempoolTaskBatch = 4
+
+	addSignedSearchTaskToPool(t, engine, privateKey, sender.String(), 0, SearchTaskRequest{
+		Query:           "serial sender",
+		URL:             "https://example.com/0",
+		BaseBounty:      "100",
+		Difficulty:      1,
+		DataVolumeBytes: 10,
+	})
+	addSignedSearchTaskToPool(t, engine, privateKey, sender.String(), 1, SearchTaskRequest{
+		Query:           "serial sender",
+		URL:             "https://example.com/1",
+		BaseBounty:      "100",
+		Difficulty:      1,
+		DataVolumeBytes: 10,
+	})
+
+	block, err := engine.MineOnce(t.Context())
+	if err != nil {
+		t.Fatalf("MineOnce returned error: %v", err)
+	}
+	if block.Hash != "" {
+		t.Fatalf("block hash = %s, want no block when sender lane stalls", block.Hash)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(attempts) != 1 || attempts[0] != "https://example.com/0" {
+		t.Fatalf("crawler attempts = %v, want only the first sender URL", attempts)
+	}
+
+	pending := engine.PendingSearchTasks(sender.String(), 10)
+	if len(pending) != 2 {
+		t.Fatalf("pending search tasks = %d, want 2 requeued tasks", len(pending))
 	}
 }
 

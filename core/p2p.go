@@ -544,6 +544,9 @@ func (p *P2PNode) handleChainSync(stream network.Stream) {
 	}
 
 	response.Blocks = make([]Block, 0, request.Limit)
+	const syncEnvelopeReserve = 2048
+	maxPayloadBytes := MaxChainSyncResponseBytes - syncEnvelopeReserve
+	estimatedBytes := 0
 	for number := request.StartNumber; number <= latest.Header.Number && len(response.Blocks) < request.Limit; number++ {
 		block, err := p.chainProvider.GetBlockByNumber(number)
 		if err != nil {
@@ -551,7 +554,21 @@ func (p *P2PNode) handleChainSync(stream network.Stream) {
 			response.Error = err.Error()
 			break
 		}
+		blockBytes, err := json.Marshal(block)
+		if err != nil {
+			p.penalizePeer(remotePeer, 6, err.Error())
+			response.Error = err.Error()
+			break
+		}
+		if len(response.Blocks) > 0 && estimatedBytes+len(blockBytes)+1 > maxPayloadBytes {
+			break
+		}
+		if len(response.Blocks) == 0 && len(blockBytes) > maxPayloadBytes {
+			response.Error = "block exceeds chain sync payload limit"
+			break
+		}
 		response.Blocks = append(response.Blocks, block)
+		estimatedBytes += len(blockBytes) + 1
 	}
 	if response.Error == "" {
 		p.rewardPeer(remotePeer, 1, "served chain sync request")
@@ -667,6 +684,25 @@ func (p *P2PNode) PeerSummary() PeerReputationSummary {
 		return PeerReputationSummary{}
 	}
 	return p.reputation.Summary(p.connectedPeerSet())
+}
+
+func (p *P2PNode) LocalPeerID() string {
+	if p == nil || p.host == nil {
+		return ""
+	}
+	return p.host.ID().String()
+}
+
+func (p *P2PNode) ConnectedPeerIDs() []string {
+	if p == nil || p.host == nil {
+		return nil
+	}
+	out := make([]string, 0, len(p.host.Network().Peers()))
+	for _, id := range p.host.Network().Peers() {
+		out = append(out, id.String())
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (p *P2PNode) connectedPeerSet() map[peer.ID]bool {

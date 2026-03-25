@@ -1,7 +1,9 @@
 package core
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/json"
 	"math/big"
 	"path/filepath"
@@ -294,6 +296,187 @@ func TestSystemContractsExposeDescriptorMetadata(t *testing.T) {
 	if len(uns.Functions) < 3 {
 		t.Fatalf("uns contract functions len = %d, want at least 3", len(uns.Functions))
 	}
+}
+
+func TestApplyTransactionDeploysUserNoteContract(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate deployer key: %v", err)
+	}
+	deployer, err := types.NewAddressFromPubKey(publicKey)
+	if err != nil {
+		t.Fatalf("derive deployer address: %v", err)
+	}
+
+	state := NewStateSnapshot()
+	state.Balances[deployer.String()] = big.NewInt(10_000)
+
+	request := ContractDeploymentRequest{
+		Name:        "PublicNote",
+		Runtime:     UserContractRuntimeNoteV1,
+		Description: "user deployed note runtime",
+		Source:      "protocol://tests/public-note",
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal deployment request: %v", err)
+	}
+
+	deployTx := Transaction{
+		Type:  TxTypeContractDeploy,
+		From:  deployer.String(),
+		Value: "0",
+		Nonce: 0,
+		Data:  payload,
+	}
+	if err := deployTx.Sign(privateKey); err != nil {
+		t.Fatalf("sign deploy tx: %v", err)
+	}
+
+	applied, err := ApplyTransaction(state, deployTx)
+	if err != nil {
+		t.Fatalf("apply deploy tx: %v", err)
+	}
+	if applied.Contract == nil {
+		t.Fatalf("expected deployed contract in apply result")
+	}
+	record, ok := state.Contracts[applied.Contract.Address]
+	if !ok {
+		t.Fatalf("deployed contract not stored in state")
+	}
+	if record.Handler != UserContractRuntimeNoteV1 {
+		t.Fatalf("runtime = %s, want %s", record.Handler, UserContractRuntimeNoteV1)
+	}
+	if record.Owner != deployer.String() {
+		t.Fatalf("owner = %s, want %s", record.Owner, deployer.String())
+	}
+	if !record.Executable {
+		t.Fatalf("contract should be executable")
+	}
+	if !strings.HasPrefix(record.Code, "0xfe") {
+		t.Fatalf("descriptor code = %s, want descriptor prefix", record.Code)
+	}
+
+	setData, err := encodeSingleStringCall(setNoteSelector, "hello ledger")
+	if err != nil {
+		t.Fatalf("encode setNote call: %v", err)
+	}
+	setTx := Transaction{
+		Type:  TxTypeTransfer,
+		From:  deployer.String(),
+		To:    record.Address,
+		Value: "0",
+		Nonce: 1,
+		Data:  setData,
+	}
+	if err := setTx.Sign(privateKey); err != nil {
+		t.Fatalf("sign setNote tx: %v", err)
+	}
+	if _, err := ApplyTransaction(state, setTx); err != nil {
+		t.Fatalf("apply setNote tx: %v", err)
+	}
+	if got := state.ContractData[record.Address]; got != "hello ledger" {
+		t.Fatalf("stored note = %q, want %q", got, "hello ledger")
+	}
+
+	output, err := ExecuteUserContractReadOnlyCall(state, record, CallMessage{
+		To:   record.Address,
+		Data: noteSelector[:],
+	})
+	if err != nil {
+		t.Fatalf("read-only call returned error: %v", err)
+	}
+	if got := decodeABIStringForTest(t, output); got != "hello ledger" {
+		t.Fatalf("note output = %q, want %q", got, "hello ledger")
+	}
+}
+
+func TestBlockchainListsAndLoadsUserContracts(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate deployer key: %v", err)
+	}
+	deployer, err := types.NewAddressFromPubKey(publicKey)
+	if err != nil {
+		t.Fatalf("derive deployer address: %v", err)
+	}
+
+	chain, err := OpenBlockchain(BlockchainConfig{
+		DataDir: filepath.Join(t.TempDir(), "chain"),
+		GenesisBalances: map[string]*big.Int{
+			deployer.String(): big.NewInt(10_000),
+		},
+	})
+	if err != nil {
+		t.Fatalf("open blockchain: %v", err)
+	}
+	defer chain.Close()
+
+	request := ContractDeploymentRequest{
+		Name:        "PublicNote",
+		Runtime:     UserContractRuntimeNoteV1,
+		Description: "user deployed note runtime",
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal deployment request: %v", err)
+	}
+
+	tx := Transaction{
+		Type:  TxTypeContractDeploy,
+		From:  deployer.String(),
+		Value: "0",
+		Nonce: 0,
+		Data:  payload,
+	}
+	if err := tx.Sign(privateKey); err != nil {
+		t.Fatalf("sign deploy tx: %v", err)
+	}
+	if _, err := chain.MineBlock(deployer.String(), []Transaction{tx}, nil); err != nil {
+		t.Fatalf("MineBlock deploy returned error: %v", err)
+	}
+
+	address := deriveUserContractAddress(tx.Hash)
+	record, ok := chain.ContractAt(address)
+	if !ok {
+		t.Fatalf("ContractAt(%s) not found", address)
+	}
+	if record.Name != "PublicNote" {
+		t.Fatalf("contract name = %s, want PublicNote", record.Name)
+	}
+	if code := chain.ContractCodeAt(address); code != record.Code {
+		t.Fatalf("contract code mismatch")
+	}
+
+	records := chain.ListContracts()
+	found := false
+	for _, candidate := range records {
+		if candidate.Address == address {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("deployed contract %s not present in contract list", address)
+	}
+}
+
+func decodeABIStringForTest(t *testing.T, payload []byte) string {
+	t.Helper()
+	if len(payload) < 64 {
+		t.Fatalf("payload too short: %d", len(payload))
+	}
+	offset := binary.BigEndian.Uint64(payload[24:32])
+	if offset != 32 {
+		t.Fatalf("offset = %d, want 32", offset)
+	}
+	length := binary.BigEndian.Uint64(payload[56:64])
+	start := 64
+	end := start + int(length)
+	if end > len(payload) {
+		t.Fatalf("payload length %d exceeds buffer %d", end, len(payload))
+	}
+	return string(bytes.TrimRight(payload[start:end], "\x00"))
 }
 
 func TestMineBlockStoresSearchProofState(t *testing.T) {
@@ -681,8 +864,14 @@ func TestBlockchainReloadPreservesLargeIndexedPages(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected search record for %s after reload", request.URL)
 	}
-	if reloadedRecord.Body != largeBody {
-		t.Fatalf("reloaded body length = %d, want %d", len(reloadedRecord.Body), len(largeBody))
+	if len(reloadedRecord.Body) >= len(largeBody) {
+		t.Fatalf("reloaded body length = %d, want less than %d", len(reloadedRecord.Body), len(largeBody))
+	}
+	if len(reloadedRecord.Body) != maxStoredProofBodyBytes {
+		t.Fatalf("reloaded body length = %d, want %d", len(reloadedRecord.Body), maxStoredProofBodyBytes)
+	}
+	if reloadedRecord.BodyBytes != uint64(len(largeBody)) {
+		t.Fatalf("reloaded body bytes = %d, want %d", reloadedRecord.BodyBytes, len(largeBody))
 	}
 
 	block, err := reloaded.GetBlockByNumber(mined.Header.Number)
@@ -691,5 +880,8 @@ func TestBlockchainReloadPreservesLargeIndexedPages(t *testing.T) {
 	}
 	if block.Hash != mined.Hash {
 		t.Fatalf("block hash = %s, want %s", block.Hash, mined.Hash)
+	}
+	if got := len(block.Body.CrawlProofs[0].Page.Body); got != maxStoredProofBodyBytes {
+		t.Fatalf("stored proof body length = %d, want %d", got, maxStoredProofBodyBytes)
 	}
 }

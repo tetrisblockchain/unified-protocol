@@ -26,10 +26,17 @@ import (
 )
 
 const (
-	SimHashSimilarityThreshold = 0.95
-	ValidatorSampleSize        = 3
-	ValidatorQuorum            = 2
-	DefaultCrawlerUserAgent    = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+	SimHashSimilarityThreshold        = 0.95
+	ValidatorSampleSize               = 3
+	ValidatorQuorum                   = 2
+	DefaultCrawlerUserAgent           = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+	DefaultCrawlerTimeout             = 10 * time.Second
+	DefaultCrawlerMaxBodyBytes        = 4 << 20
+	DefaultCrawlerMaxIdleConns        = 128
+	DefaultCrawlerMaxIdleConnsPerHost = 16
+	DefaultCrawlerMaxConnsPerHost     = 32
+	DefaultCrawlerIdleConnTimeout     = 90 * time.Second
+	DefaultCrawlerPerHostConcurrency  = 4
 )
 
 var (
@@ -88,6 +95,21 @@ type CollyCrawler struct {
 	AllowedDomains []string
 	RequestTimeout time.Duration
 	MaxBodyBytes   int
+	Transport      http.RoundTripper
+	Limiter        *CrawlLimiter
+
+	MaxIdleConns        int
+	MaxIdleConnsPerHost int
+	MaxConnsPerHost     int
+	IdleConnTimeout     time.Duration
+}
+
+type CrawlLimiter struct {
+	globalSlots  chan struct{}
+	perHostLimit int
+
+	mu        sync.Mutex
+	hostSlots map[string]chan struct{}
 }
 
 type PriorityRegistry struct {
@@ -230,6 +252,51 @@ func QuoteBounty(baseBounty *big.Int, difficulty, dataVolume uint64) (*big.Int, 
 	return new(big.Int).Add(base, extra), nil
 }
 
+func NewCrawlerTransport(requestTimeout time.Duration, maxIdleConns, maxIdleConnsPerHost, maxConnsPerHost int, idleConnTimeout time.Duration) *http.Transport {
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.DisableKeepAlives = false
+	base.Proxy = http.ProxyFromEnvironment
+	base.ForceAttemptHTTP2 = true
+
+	if requestTimeout > 0 {
+		base.ResponseHeaderTimeout = requestTimeout
+	}
+	if maxIdleConns <= 0 {
+		maxIdleConns = DefaultCrawlerMaxIdleConns
+	}
+	if maxIdleConnsPerHost <= 0 {
+		maxIdleConnsPerHost = DefaultCrawlerMaxIdleConnsPerHost
+	}
+	if maxConnsPerHost <= 0 {
+		maxConnsPerHost = DefaultCrawlerMaxConnsPerHost
+	}
+	if idleConnTimeout <= 0 {
+		idleConnTimeout = DefaultCrawlerIdleConnTimeout
+	}
+
+	base.MaxIdleConns = maxIdleConns
+	base.MaxIdleConnsPerHost = maxIdleConnsPerHost
+	base.MaxConnsPerHost = maxConnsPerHost
+	base.IdleConnTimeout = idleConnTimeout
+
+	return base
+}
+
+func NewCrawlLimiter(globalLimit, perHostLimit int) *CrawlLimiter {
+	if globalLimit <= 0 && perHostLimit <= 0 {
+		return nil
+	}
+
+	limiter := &CrawlLimiter{
+		perHostLimit: perHostLimit,
+		hostSlots:    make(map[string]chan struct{}),
+	}
+	if globalLimit > 0 {
+		limiter.globalSlots = make(chan struct{}, globalLimit)
+	}
+	return limiter
+}
+
 func (c CollyCrawler) Index(ctx context.Context, task CrawlTask, targetURL string) (IndexedPage, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -249,6 +316,12 @@ func (c CollyCrawler) Index(ctx context.Context, task CrawlTask, targetURL strin
 		IndexedAt: time.Now().UTC(),
 	}
 
+	releaseLimiter, err := c.acquireLimiter(ctx, target)
+	if err != nil {
+		return IndexedPage{}, err
+	}
+	defer releaseLimiter()
+
 	collector := colly.NewCollector(colly.AllowURLRevisit())
 	if strings.TrimSpace(c.UserAgent) != "" {
 		collector.UserAgent = c.UserAgent
@@ -265,11 +338,7 @@ func (c CollyCrawler) Index(ctx context.Context, task CrawlTask, targetURL strin
 	if c.RequestTimeout > 0 {
 		collector.SetRequestTimeout(c.RequestTimeout)
 	}
-	collector.WithTransport(&http.Transport{
-		DisableKeepAlives:     true,
-		Proxy:                 http.ProxyFromEnvironment,
-		ResponseHeaderTimeout: c.RequestTimeout,
-	})
+	collector.WithTransport(c.transport())
 
 	var crawlErr error
 	links := make([]string, 0, 16)
@@ -331,6 +400,88 @@ func (c CollyCrawler) Index(ctx context.Context, task CrawlTask, targetURL strin
 	result.SimHash = SimHash(result.Title + " " + result.Body)
 
 	return result, nil
+}
+
+func (c CollyCrawler) transport() http.RoundTripper {
+	if c.Transport != nil {
+		return c.Transport
+	}
+	return NewCrawlerTransport(c.RequestTimeout, c.MaxIdleConns, c.MaxIdleConnsPerHost, c.MaxConnsPerHost, c.IdleConnTimeout)
+}
+
+func (c CollyCrawler) acquireLimiter(ctx context.Context, rawURL string) (func(), error) {
+	if c.Limiter == nil {
+		return func() {}, nil
+	}
+	return c.Limiter.Acquire(ctx, rawURL)
+}
+
+func (l *CrawlLimiter) Acquire(ctx context.Context, rawURL string) (func(), error) {
+	if l == nil {
+		return func() {}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	host := strings.ToLower(parsed.Hostname())
+
+	releaseFns := make([]func(), 0, 2)
+	if l.globalSlots != nil {
+		if err := acquireLimiterSlot(ctx, l.globalSlots); err != nil {
+			return nil, err
+		}
+		releaseFns = append(releaseFns, func() {
+			<-l.globalSlots
+		})
+	}
+
+	if l.perHostLimit > 0 && host != "" {
+		hostSlots := l.hostSlot(host)
+		if err := acquireLimiterSlot(ctx, hostSlots); err != nil {
+			for i := len(releaseFns) - 1; i >= 0; i-- {
+				releaseFns[i]()
+			}
+			return nil, err
+		}
+		releaseFns = append(releaseFns, func() {
+			<-hostSlots
+		})
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for i := len(releaseFns) - 1; i >= 0; i-- {
+				releaseFns[i]()
+			}
+		})
+	}, nil
+}
+
+func (l *CrawlLimiter) hostSlot(host string) chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if slot, ok := l.hostSlots[host]; ok {
+		return slot
+	}
+	slot := make(chan struct{}, l.perHostLimit)
+	l.hostSlots[host] = slot
+	return slot
+}
+
+func acquireLimiterSlot(ctx context.Context, slots chan struct{}) error {
+	select {
+	case slots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (l *GovernanceListener) Run(ctx context.Context) error {

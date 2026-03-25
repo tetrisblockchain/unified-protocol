@@ -389,6 +389,11 @@ func (s *RPCServer) handle(r rpcRequest) (any, *rpcError) {
 			return nil, rpcFailure(errors.New("mempool is unavailable"))
 		}
 		return s.Engine.MempoolStatus(), nil
+	case "ufi_getMiningStatus":
+		if s.Engine == nil {
+			return nil, rpcFailure(errors.New("mining status is unavailable"))
+		}
+		return s.Engine.MiningStatus(), nil
 	case "ufi_getPendingTransactions":
 		if s.Engine == nil {
 			return nil, rpcFailure(errors.New("mempool is unavailable"))

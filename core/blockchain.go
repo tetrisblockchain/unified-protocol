@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	badger "github.com/dgraph-io/badger/v4"
 
@@ -41,6 +42,10 @@ const (
 	maxProofWorkBodyBoostBPS             = uint64(2500)
 	maxProofWorkHostPenaltyFloorBPS      = uint64(2500)
 	maxProofWorkSubmitterPenaltyFloorBPS = uint64(4000)
+	maxStoredProofTitleBytes             = 1024
+	maxStoredProofSnippetBytes           = 512
+	maxStoredProofBodyBytes              = 8 << 10
+	maxStoredProofOutboundLinks          = 64
 
 	blockNumberPrefix    = "blocks/number/"
 	blockHashPrefix      = "blocks/hash/"
@@ -80,8 +85,9 @@ var (
 type TxType string
 
 const (
-	TxTypeTransfer   TxType = "transfer"
-	TxTypeSearchTask TxType = "search_task"
+	TxTypeTransfer       TxType = "transfer"
+	TxTypeSearchTask     TxType = "search_task"
+	TxTypeContractDeploy TxType = "contract_deploy"
 )
 
 type SearchTaskRequest struct {
@@ -90,6 +96,16 @@ type SearchTaskRequest struct {
 	BaseBounty      string `json:"baseBounty"`
 	Difficulty      uint64 `json:"difficulty"`
 	DataVolumeBytes uint64 `json:"dataVolumeBytes"`
+}
+
+type ContractDeploymentRequest struct {
+	Name         string             `json:"name"`
+	Runtime      string             `json:"runtime,omitempty"`
+	Description  string             `json:"description,omitempty"`
+	Source       string             `json:"source,omitempty"`
+	StorageModel string             `json:"storageModel,omitempty"`
+	Code         string             `json:"code,omitempty"`
+	Functions    []ContractFunction `json:"functions,omitempty"`
 }
 
 type SearchTaskRecord struct {
@@ -121,6 +137,7 @@ type SearchRecord struct {
 	Title       string            `json:"title"`
 	Snippet     string            `json:"snippet"`
 	Body        string            `json:"body"`
+	BodyBytes   uint64            `json:"bodyBytes"`
 	ContentHash string            `json:"contentHash"`
 	SimHash     uint64            `json:"simHash"`
 	IndexedAt   time.Time         `json:"indexedAt"`
@@ -257,6 +274,8 @@ type StateSnapshot struct {
 	SearchIndex   map[string]SearchRecord
 	MentionCounts map[string]uint64
 	Names         map[string]NameRecord
+	Contracts     map[string]ContractRecord
+	ContractData  map[string]string
 }
 
 type stateSnapshotDisk struct {
@@ -266,6 +285,8 @@ type stateSnapshotDisk struct {
 	SearchIndex   map[string]SearchRecord     `json:"searchIndex"`
 	MentionCounts map[string]uint64           `json:"mentionCounts"`
 	Names         map[string]NameRecord       `json:"names"`
+	Contracts     map[string]ContractRecord   `json:"contracts"`
+	ContractData  map[string]string           `json:"contractData"`
 }
 
 type BlockMeta struct {
@@ -282,6 +303,7 @@ type AppliedTransaction struct {
 	ArchitectFee *big.Int
 	NetValue     *big.Int
 	Task         *SearchTaskRecord
+	Contract     *ContractRecord
 }
 
 type SearchTaskEnvelope struct {
@@ -298,6 +320,8 @@ func NewStateSnapshot() *StateSnapshot {
 		SearchIndex:   make(map[string]SearchRecord),
 		MentionCounts: make(map[string]uint64),
 		Names:         make(map[string]NameRecord),
+		Contracts:     make(map[string]ContractRecord),
+		ContractData:  make(map[string]string),
 	}
 }
 
@@ -322,6 +346,14 @@ func (s *StateSnapshot) Clone() *StateSnapshot {
 	}
 	for name, record := range s.Names {
 		cloned.Names[name] = record
+	}
+	for address, record := range s.Contracts {
+		copyRecord := record
+		copyRecord.Functions = append([]ContractFunction(nil), record.Functions...)
+		cloned.Contracts[address] = copyRecord
+	}
+	for address, value := range s.ContractData {
+		cloned.ContractData[address] = value
 	}
 	return cloned
 }
@@ -613,16 +645,24 @@ func (bc *Blockchain) CallContract(call CallMessage, blockRef string) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	if !IsNativeContractAddress(call.To) {
+	if IsNativeContractAddress(call.To) {
+		return ExecuteReadOnlyCall(state, call)
+	}
+	record, ok := state.Contracts[strings.TrimSpace(call.To)]
+	if !ok {
 		return nil, ErrUnsupportedNativeContract
 	}
-	return ExecuteReadOnlyCall(state, call)
+	return ExecuteUserContractReadOnlyCall(state, record, call)
 }
 
 func (bc *Blockchain) ContractAt(address string) (ContractRecord, bool) {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 	cleaned := strings.TrimSpace(address)
+	if record, ok := bc.state.Contracts[cleaned]; ok {
+		record.Functions = append([]ContractFunction(nil), record.Functions...)
+		return record, true
+	}
 	for _, record := range bc.network.SystemContracts {
 		if record.Address == cleaned {
 			record.Functions = append([]ContractFunction(nil), record.Functions...)
@@ -643,10 +683,21 @@ func (bc *Blockchain) ContractCodeAt(address string) string {
 func (bc *Blockchain) ListContracts() []ContractRecord {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
+	var records []ContractRecord
 	if len(bc.network.SystemContracts) == 0 {
-		return ListSystemContracts()
+		records = ListSystemContracts()
+	} else {
+		records = cloneContractRecords(bc.network.SystemContracts)
 	}
-	return cloneContractRecords(bc.network.SystemContracts)
+	for _, record := range bc.state.Contracts {
+		copyRecord := record
+		copyRecord.Functions = append([]ContractFunction(nil), record.Functions...)
+		records = append(records, copyRecord)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Address < records[j].Address
+	})
+	return records
 }
 
 func (bc *Blockchain) UNSRegistrationPrice(name string) (*big.Int, error) {
@@ -1315,7 +1366,14 @@ func ApplyTransactionWithArchitect(state *StateSnapshot, tx Transaction, archite
 	if err != nil {
 		return AppliedTransaction{}, err
 	}
-	if value.Sign() <= 0 {
+	allowZeroValueTransfer := normalized.Type == TxTypeTransfer &&
+		len(normalized.Data) > 0 &&
+		(IsNativeContractAddress(normalized.To) || state.Contracts[strings.TrimSpace(normalized.To)].Address != "")
+	if normalized.Type == TxTypeContractDeploy {
+		if value.Sign() < 0 {
+			return AppliedTransaction{}, ErrInvalidTransaction
+		}
+	} else if value.Sign() <= 0 && !allowZeroValueTransfer {
 		return AppliedTransaction{}, ErrInvalidTransaction
 	}
 
@@ -1350,6 +1408,12 @@ func ApplyTransactionWithArchitect(state *StateSnapshot, tx Transaction, archite
 			}
 			break
 		}
+		if contract, ok := state.Contracts[normalized.To]; ok {
+			if err := ExecuteUserContractTransfer(state, contract, normalized, value, netValue); err != nil {
+				return AppliedTransaction{}, err
+			}
+			break
+		}
 		if err := validateNonSystemAddressWithArchitect(normalized.To, architectAddress); err != nil {
 			return AppliedTransaction{}, err
 		}
@@ -1376,6 +1440,29 @@ func ApplyTransactionWithArchitect(state *StateSnapshot, tx Transaction, archite
 		}
 		state.PendingTasks[record.ID] = record
 		result.Task = &record
+	case TxTypeContractDeploy:
+		request, err := normalized.ContractDeploymentRequest()
+		if err != nil {
+			return AppliedTransaction{}, err
+		}
+		record, err := BuildUserContractRecord(normalized, request)
+		if err != nil {
+			return AppliedTransaction{}, err
+		}
+		if normalized.To != "" || record.Address == "" {
+			return AppliedTransaction{}, ErrInvalidTransaction
+		}
+		if IsNativeContractAddress(record.Address) {
+			return AppliedTransaction{}, ErrInvalidTransaction
+		}
+		if _, exists := state.Contracts[record.Address]; exists {
+			return AppliedTransaction{}, ErrInvalidTransaction
+		}
+		state.Contracts[record.Address] = record
+		if record.Handler == UserContractRuntimeNoteV1 {
+			state.ContractData[record.Address] = ""
+		}
+		result.Contract = &record
 	default:
 		return AppliedTransaction{}, ErrInvalidTransaction
 	}
@@ -1423,6 +1510,7 @@ func ApplyCrawlProof(state *StateSnapshot, proof CrawlProof, blockHash string) (
 		Title:       normalized.Page.Title,
 		Snippet:     normalized.Page.Snippet,
 		Body:        normalized.Page.Body,
+		BodyBytes:   normalized.Page.BodyBytes,
 		ContentHash: normalized.Page.ContentHash,
 		SimHash:     normalized.Page.SimHash,
 		IndexedAt:   normalized.CreatedAt,
@@ -1532,8 +1620,22 @@ func (tx Transaction) SearchTaskRequest() (SearchTaskRequest, error) {
 	return request, nil
 }
 
+func (tx Transaction) ContractDeploymentRequest() (ContractDeploymentRequest, error) {
+	var request ContractDeploymentRequest
+	if tx.Type != TxTypeContractDeploy {
+		return request, ErrInvalidTransaction
+	}
+	if len(tx.Data) == 0 {
+		return request, ErrInvalidTransaction
+	}
+	if err := json.Unmarshal(tx.Data, &request); err != nil {
+		return request, err
+	}
+	return normalizeContractDeploymentRequest(request)
+}
+
 func (tx Transaction) ValidateSignature() error {
-	if tx.Type != TxTypeTransfer && tx.Type != TxTypeSearchTask {
+	if tx.Type != TxTypeTransfer && tx.Type != TxTypeSearchTask && tx.Type != TxTypeContractDeploy {
 		return ErrInvalidTransaction
 	}
 	if err := validateNonSystemAddress(tx.From); err != nil {
@@ -1587,6 +1689,17 @@ func normalizeCrawlProof(proof CrawlProof) (CrawlProof, error) {
 	normalized.URL = strings.TrimSpace(normalized.URL)
 	normalized.Query = strings.TrimSpace(normalized.Query)
 	normalized.Miner = strings.TrimSpace(normalized.Miner)
+	originalBodyBytes := normalized.Page.BodyBytes
+	if originalBodyBytes == 0 {
+		originalBodyBytes = uint64(len(normalized.Page.Body))
+	}
+	normalized.Page.URL = strings.TrimSpace(normalized.Page.URL)
+	normalized.Page.Title = truncateUTF8Bytes(strings.TrimSpace(normalized.Page.Title), maxStoredProofTitleBytes)
+	normalized.Page.Snippet = truncateUTF8Bytes(strings.TrimSpace(normalized.Page.Snippet), maxStoredProofSnippetBytes)
+	normalized.Page.Body = truncateUTF8Bytes(strings.TrimSpace(normalized.Page.Body), maxStoredProofBodyBytes)
+	normalized.Page.BodyBytes = originalBodyBytes
+	normalized.Page.ContentHash = strings.TrimSpace(normalized.Page.ContentHash)
+	normalized.Page.OutboundLinks = truncateOutboundLinks(normalized.Page.OutboundLinks, maxStoredProofOutboundLinks)
 	if normalized.TaskID == "" || normalized.URL == "" || normalized.Miner == "" {
 		return CrawlProof{}, ErrInvalidBlock
 	}
@@ -1600,6 +1713,47 @@ func normalizeCrawlProof(proof CrawlProof) (CrawlProof, error) {
 		return CrawlProof{}, ErrInvalidBlock
 	}
 	return normalized, nil
+}
+
+func truncateUTF8Bytes(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	var builder strings.Builder
+	builder.Grow(limit)
+	written := 0
+	for _, r := range value {
+		size := utf8.RuneLen(r)
+		if size < 0 || written+size > limit {
+			break
+		}
+		builder.WriteRune(r)
+		written += size
+	}
+	return builder.String()
+}
+
+func truncateOutboundLinks(links []string, limit int) []string {
+	if limit <= 0 || len(links) == 0 {
+		return nil
+	}
+	out := make([]string, 0, min(limit, len(links)))
+	seen := make(map[string]struct{}, min(limit, len(links)))
+	for _, link := range links {
+		cleaned := strings.TrimSpace(link)
+		if cleaned == "" {
+			continue
+		}
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		out = append(out, cleaned)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 func buildAutonomousSearchTaskRecords(state *StateSnapshot, parent SearchTaskRecord, proof CrawlProof) []SearchTaskRecord {
@@ -2614,6 +2768,8 @@ func marshalStateSnapshot(state *StateSnapshot) ([]byte, error) {
 		SearchIndex:   make(map[string]SearchRecord, len(state.SearchIndex)),
 		MentionCounts: cloneUint64Map(state.MentionCounts),
 		Names:         make(map[string]NameRecord, len(state.Names)),
+		Contracts:     make(map[string]ContractRecord, len(state.Contracts)),
+		ContractData:  make(map[string]string, len(state.ContractData)),
 	}
 	for address, balance := range state.Balances {
 		disk.Balances[address] = cloneBigInt(balance).String()
@@ -2628,6 +2784,14 @@ func marshalStateSnapshot(state *StateSnapshot) ([]byte, error) {
 	}
 	for name, record := range state.Names {
 		disk.Names[name] = record
+	}
+	for address, record := range state.Contracts {
+		copyRecord := record
+		copyRecord.Functions = append([]ContractFunction(nil), record.Functions...)
+		disk.Contracts[address] = copyRecord
+	}
+	for address, value := range state.ContractData {
+		disk.ContractData[address] = value
 	}
 	return json.Marshal(disk)
 }
@@ -2666,6 +2830,14 @@ func unmarshalStateSnapshot(data []byte) (*StateSnapshot, error) {
 	}
 	for name, record := range disk.Names {
 		snapshot.Names[name] = record
+	}
+	for address, record := range disk.Contracts {
+		copyRecord := record
+		copyRecord.Functions = append([]ContractFunction(nil), record.Functions...)
+		snapshot.Contracts[address] = copyRecord
+	}
+	for address, value := range disk.ContractData {
+		snapshot.ContractData[address] = value
 	}
 	return snapshot, nil
 }

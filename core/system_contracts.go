@@ -25,6 +25,8 @@ type ContractRecord struct {
 	Code            string             `json:"code"`
 	CodeHash        string             `json:"codeHash"`
 	Description     string             `json:"description"`
+	Owner           string             `json:"owner,omitempty"`
+	TxHash          string             `json:"txHash,omitempty"`
 	System          bool               `json:"system"`
 	Executable      bool               `json:"executable"`
 	GenesisDeployed bool               `json:"genesisDeployed"`
@@ -122,7 +124,7 @@ func buildProtocolSystemContracts() map[string]systemContract {
 		"System UNS registry contract with popularity-based pricing and architect fee enforcement.",
 		"protocol://system/uns-registry",
 		"derived from names, balances, and mention counts",
-		false,
+		true,
 		unsFunctions,
 	)
 

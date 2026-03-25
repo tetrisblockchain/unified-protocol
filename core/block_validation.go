@@ -18,6 +18,16 @@ const (
 	BlockValidationTimeout = 12 * time.Second
 )
 
+type ValidationMode string
+
+const (
+	ValidationModeStrict        ValidationMode = "strict"
+	ValidationModeSampled       ValidationMode = "sampled"
+	ValidationModeOpportunistic ValidationMode = "opportunistic"
+	DefaultValidationMode       ValidationMode = ValidationModeStrict
+	DefaultValidationSampleSize                = 4
+)
+
 var ErrForkNotPreferred = errors.New("core: fork not preferred by fork choice")
 
 type BlockImportValidator struct {
@@ -25,6 +35,9 @@ type BlockImportValidator struct {
 	PriorityRegistry *consensus.PriorityRegistry
 	ArchitectAddress string
 	Logger           *log.Logger
+	Mode             ValidationMode
+	SampleSize       int
+	Timeout          time.Duration
 }
 
 func NewLocalBlockImportValidator(crawler consensus.Crawler, registry *consensus.PriorityRegistry, architectAddress string, logger *log.Logger) *BlockImportValidator {
@@ -46,6 +59,9 @@ func NewLocalBlockImportValidator(crawler consensus.Crawler, registry *consensus
 		PriorityRegistry: registry,
 		ArchitectAddress: normalizedArchitectAddress(architectAddress),
 		Logger:           logger,
+		Mode:             DefaultValidationMode,
+		SampleSize:       DefaultValidationSampleSize,
+		Timeout:          BlockValidationTimeout,
 	}
 }
 
@@ -58,13 +74,15 @@ func (v *BlockImportValidator) ValidateBlock(ctx context.Context, preState *Stat
 	}
 
 	snapshot := preState.Clone()
+	fullValidationIndexes := v.fullValidationIndexes(block)
+
 	for _, tx := range block.Body.Transactions {
 		if _, err := ApplyTransactionWithArchitect(snapshot, tx, v.ArchitectAddress); err != nil {
 			return err
 		}
 	}
 
-	for _, proof := range block.Body.CrawlProofs {
+	for index, proof := range block.Body.CrawlProofs {
 		taskRecord, ok := snapshot.PendingTasks[proof.TaskID]
 		if !ok {
 			return ErrTaskNotFound
@@ -78,45 +96,153 @@ func (v *BlockImportValidator) ValidateBlock(ctx context.Context, preState *Stat
 		if err != nil {
 			return err
 		}
-
-		grossBounty, _ := new(big.Int).SetString(taskRecord.GrossBounty, 10)
-		architectFee, _ := new(big.Int).SetString(taskRecord.ArchitectFee, 10)
-		minerReward, _ := new(big.Int).SetString(taskRecord.MinerReward, 10)
-		verifyCtx, cancel := context.WithTimeout(ctx, BlockValidationTimeout)
-		result, err := consensus.VerifyMiningResult(
-			verifyCtx,
-			task,
-			consensus.MiningResult{
-				TaskID:                 proof.TaskID,
-				MinerID:                proof.Miner,
-				URL:                    proof.URL,
-				Page:                   proof.Page,
-				ProofHash:              proof.ProofHash,
-				AppliedMultiplierBPS:   adjustment.MultiplierBPS,
-				AppliedPrioritySectors: append([]string(nil), adjustment.PrioritySectors...),
-				AdjustedDifficulty:     adjustment.AdjustedDifficulty,
-				AdjustedBounty:         cloneBigInt(grossBounty),
-				ArchitectFee:           cloneBigInt(architectFee),
-				MinerReward:            cloneBigInt(minerReward),
-				CompletedAt:            proof.CreatedAt,
-			},
-			v.Validators,
-			rand.New(rand.NewSource(int64(block.Header.Number)+int64(len(proof.TaskID)))),
-		)
-		cancel()
-		if err != nil {
+		if err := validateImportedProof(taskRecord, adjustment, proof); err != nil {
 			return err
 		}
-		if !result.Approved {
-			if v.Logger != nil {
-				v.Logger.Printf("rejecting block %s task %s: similarity quorum failed", block.Hash, proof.TaskID)
+
+		if _, shouldFullyValidate := fullValidationIndexes[index]; shouldFullyValidate {
+			grossBounty, _ := new(big.Int).SetString(taskRecord.GrossBounty, 10)
+			architectFee, _ := new(big.Int).SetString(taskRecord.ArchitectFee, 10)
+			minerReward, _ := new(big.Int).SetString(taskRecord.MinerReward, 10)
+			timeout := v.Timeout
+			if timeout <= 0 {
+				timeout = BlockValidationTimeout
 			}
-			return ErrInvalidBlock
+			verifyCtx, cancel := context.WithTimeout(ctx, timeout)
+			result, err := consensus.VerifyMiningResult(
+				verifyCtx,
+				task,
+				consensus.MiningResult{
+					TaskID:                 proof.TaskID,
+					MinerID:                proof.Miner,
+					URL:                    proof.URL,
+					Page:                   proof.Page,
+					ProofHash:              proof.ProofHash,
+					AppliedMultiplierBPS:   adjustment.MultiplierBPS,
+					AppliedPrioritySectors: append([]string(nil), adjustment.PrioritySectors...),
+					AdjustedDifficulty:     adjustment.AdjustedDifficulty,
+					AdjustedBounty:         cloneBigInt(grossBounty),
+					ArchitectFee:           cloneBigInt(architectFee),
+					MinerReward:            cloneBigInt(minerReward),
+					CompletedAt:            proof.CreatedAt,
+				},
+				v.Validators,
+				rand.New(rand.NewSource(int64(block.Header.Number)+int64(len(proof.TaskID)))),
+			)
+			cancel()
+			if err != nil {
+				return err
+			}
+			if !result.Approved {
+				if v.Logger != nil {
+					v.Logger.Printf("rejecting block %s task %s: similarity quorum failed", block.Hash, proof.TaskID)
+				}
+				return ErrInvalidBlock
+			}
 		}
 
 		if _, err := ApplyCrawlProof(snapshot, proof, block.Hash); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+func NormalizeValidationMode(value string) ValidationMode {
+	switch ValidationMode(strings.ToLower(strings.TrimSpace(value))) {
+	case ValidationModeStrict:
+		return ValidationModeStrict
+	case ValidationModeSampled:
+		return ValidationModeSampled
+	case ValidationModeOpportunistic:
+		return ValidationModeOpportunistic
+	default:
+		return DefaultValidationMode
+	}
+}
+
+func (v *BlockImportValidator) fullValidationIndexes(block Block) map[int]struct{} {
+	indexes := make(map[int]struct{})
+	proofCount := len(block.Body.CrawlProofs)
+	if proofCount == 0 {
+		return indexes
+	}
+
+	mode := v.Mode
+	if mode == "" {
+		mode = DefaultValidationMode
+	}
+
+	switch mode {
+	case ValidationModeStrict:
+		for index := range block.Body.CrawlProofs {
+			indexes[index] = struct{}{}
+		}
+		return indexes
+	case ValidationModeOpportunistic:
+		return indexes
+	case ValidationModeSampled:
+		sampleSize := v.SampleSize
+		if sampleSize <= 0 {
+			sampleSize = DefaultValidationSampleSize
+		}
+		if sampleSize >= proofCount {
+			for index := range block.Body.CrawlProofs {
+				indexes[index] = struct{}{}
+			}
+			return indexes
+		}
+
+		rng := rand.New(rand.NewSource(int64(block.Header.Number) + int64(len(block.Hash))*97))
+		for _, index := range rng.Perm(proofCount)[:sampleSize] {
+			indexes[index] = struct{}{}
+		}
+		return indexes
+	default:
+		for index := range block.Body.CrawlProofs {
+			indexes[index] = struct{}{}
+		}
+		return indexes
+	}
+}
+
+func validateImportedProof(taskRecord SearchTaskRecord, adjustment consensus.TaskAdjustment, proof CrawlProof) error {
+	if strings.TrimSpace(proof.TaskTxHash) != strings.TrimSpace(taskRecord.TxHash) {
+		return ErrInvalidBlock
+	}
+	if strings.TrimSpace(proof.Query) != strings.TrimSpace(taskRecord.Query) {
+		return ErrInvalidBlock
+	}
+	if strings.TrimSpace(proof.URL) != strings.TrimSpace(taskRecord.URL) {
+		return ErrInvalidBlock
+	}
+	if strings.TrimSpace(proof.GrossBounty) != strings.TrimSpace(taskRecord.GrossBounty) {
+		return ErrInvalidBlock
+	}
+	if strings.TrimSpace(proof.ArchitectFee) != strings.TrimSpace(taskRecord.ArchitectFee) {
+		return ErrInvalidBlock
+	}
+	if strings.TrimSpace(proof.MinerReward) != strings.TrimSpace(taskRecord.MinerReward) {
+		return ErrInvalidBlock
+	}
+	if cloneBigInt(adjustment.AdjustedBounty).String() != strings.TrimSpace(taskRecord.GrossBounty) {
+		return ErrInvalidBlock
+	}
+	if cloneBigInt(adjustment.ArchitectFee).String() != strings.TrimSpace(taskRecord.ArchitectFee) {
+		return ErrInvalidBlock
+	}
+	if cloneBigInt(adjustment.NetMinerReward).String() != strings.TrimSpace(taskRecord.MinerReward) {
+		return ErrInvalidBlock
+	}
+
+	expectedHash := computeCrawlProofHash(CrawlProof{
+		TaskID: proof.TaskID,
+		URL:    proof.URL,
+		Page:   proof.Page,
+	})
+	if strings.TrimSpace(proof.ProofHash) != expectedHash {
+		return ErrInvalidBlock
 	}
 
 	return nil
